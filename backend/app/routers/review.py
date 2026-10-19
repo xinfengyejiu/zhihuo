@@ -337,6 +337,7 @@ async def ai_review(
         "给出可执行的通过/驳回建议。输出使用简体中文 Markdown,结论清楚,摘录必须来自正文。\n\n"
         f"## 审查技能(必须严格遵循)\n{skill_block}"
     )
+    instruction_block = ("## 审核员补充要求\n" + instruction + "\n\n") if instruction else ""
     user_text = (
         f"## 书名\n《{novel.title if novel else ''}》\n\n"
         f"## 全书规则\n{rule_text}\n\n"
@@ -346,7 +347,7 @@ async def ai_review(
         f"## 章纲\n{chapter.outline or '(未填)'}\n\n"
         f"## 伏笔任务\n{chapter.foreshadow_note or '(未填)'}\n\n"
         f"## 本章正文({len(content.strip())} 字)\n{content[:12000]}\n\n"
-        f"{'## 审核员补充要求\n' + instruction + '\n\n' if instruction else ''}"
+        f"{instruction_block}"
         "## 任务\n请按所选审查技能完成本章审核报告。"
     )
     messages = [

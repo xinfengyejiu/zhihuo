@@ -281,7 +281,8 @@ def _chapter_ordinal_key(title: str) -> str | None:
     if m:
         return f"ch:{int(m.group(1))}"
     if re.match(r"番外", t):
-        return f"extra:{re.sub(r'\s+', '', t)[:40]}"
+        cleaned = re.sub(r'\s+', '', t)[:40]
+        return f"extra:{cleaned}"
     return None
 
 
