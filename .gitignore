@@ -1,0 +1,50 @@
+# env & secrets
+.env
+.env.*
+!.env.example
+!**/.env.example
+!**/.env.local.example
+*_tok.txt
+**/credentials*.json
+**/*secret*
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# node / next
+node_modules/
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+.npm
+.yarn/
+
+# local databases & uploads
+*.db
+*.sqlite
+*.sqlite3
+backend/data/gen/
+backend/data/skills/
+backend/uploads/
+**/gen-assets/
+
+# ide / os
+.idea/
+.vscode/
+.cursor/
+*.swp
+.DS_Store
+Thumbs.db
+
+# logs
+*.log
+npm-debug.log*

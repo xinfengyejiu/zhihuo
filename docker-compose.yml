@@ -1,0 +1,55 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: xiaohuo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-xiaohuo_pass_change_me}
+      POSTGRES_DB: xiaohuo
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xiaohuo"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://xiaohuo:${POSTGRES_PASSWORD:-xiaohuo_pass_change_me}@db:5432/xiaohuo
+      SECRET_KEY: ${SECRET_KEY:-please_change_this_to_a_long_random_string}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8011:8011"
+    restart: unless-stopped
+
+  web:
+    build: ./frontend
+    environment:
+      NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8011/api}
+      NEXT_PUBLIC_READER_BASE: ${NEXT_PUBLIC_READER_BASE:-http://localhost:3001}
+    depends_on:
+      - api
+      - reader
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+  reader:
+    build: ./reader
+    environment:
+      NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8011/api}
+      NEXT_PUBLIC_STUDIO_BASE: ${NEXT_PUBLIC_STUDIO_BASE:-http://localhost:3000}
+    depends_on:
+      - api
+    ports:
+      - "3001:3001"
+    restart: unless-stopped
+
+volumes:
+  pgdata:

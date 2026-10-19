@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-slate-50 text-slate-800;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 手机端避免横向溢出把布局挤扁 */
+html,
+body {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+/* Tiptap 编辑器基础样式 */
+.tiptap {
+  outline: none;
+  min-height: 60vh;
+  line-height: 1.9;
+  font-size: 15px;
+}
+.tiptap p {
+  margin: 0 0 0.85em;
+  line-height: 1.95;
+}
+.tiptap p:last-child {
+  margin-bottom: 0;
+}
+.tiptap:focus {
+  outline: none;
+}
+.tiptap [contenteditable="false"] {
+  @apply opacity-60;
+}
+
+/* 阅读器主题 */
+.reader-theme-paper {
+  background: #f8f4ea;
+  color: #3b3a36;
+}
+.reader-theme-green {
+  background: #e3ede3;
+  color: #2f3b2f;
+}
+.reader-theme-dark {
+  background: #1e2028;
+  color: #c6cad3;
+}
