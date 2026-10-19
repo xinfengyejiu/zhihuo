@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import {
@@ -16,61 +16,129 @@ import type { NovelCard } from "@/lib/types";
 import { CoverImg } from "@/components/CoverImg";
 import { Button, Empty, Spinner } from "@/components/ui";
 
-interface Catalog {
+interface CatalogChapter {
+  id: number;
+  title: string;
+  word_count: number;
+  volume_title: string | null;
+}
+
+interface CatalogPage {
   novel: { id: number; title: string; summary: string | null; cover: string | null };
   progress_chapter_id: number | null;
-  chapters: {
-    id: number;
-    title: string;
-    word_count: number;
-    volume_title: string | null;
-  }[];
+  first_chapter_id: number | null;
+  page: number;
+  page_size: number;
+  total: number;
+  has_more: boolean;
+  chapters: CatalogChapter[];
 }
+
+const PAGE_SIZE = 40;
 
 export default function NovelDetailPage() {
   const { novelId } = useParams<{ novelId: string }>();
   const { user } = useAuth();
   const [detail, setDetail] = useState<NovelCard | null>(null);
-  const [catalog, setCatalog] = useState<Catalog | null>(null);
+  const [novelMeta, setNovelMeta] = useState<CatalogPage["novel"] | null>(null);
+  const [chapters, setChapters] = useState<CatalogChapter[]>([]);
+  const [progressChapterId, setProgressChapterId] = useState<number | null>(null);
+  const [firstChapterId, setFirstChapterId] = useState<number | null>(null);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
   const [favorited, setFavorited] = useState(false);
   const [liked, setLiked] = useState(false);
   const [shareTip, setShareTip] = useState("");
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const loadingMoreRef = useRef(false);
 
-  const load = useCallback(async () => {
+  const applyLocalProgress = useCallback(
+    (c: CatalogPage) => {
+      setProgressChapterId(c.progress_chapter_id);
+      setFirstChapterId(c.first_chapter_id);
+      if (user) return;
+      setFavorited(getLocalFavIds().includes(+novelId));
+      setLiked(getLocalLikeIds().includes(+novelId));
+      const local = getLocalProgress().find((p) => p.novel_id === +novelId);
+      if (local && !c.progress_chapter_id) {
+        setProgressChapterId(local.chapter_id);
+      }
+    },
+    [novelId, user]
+  );
+
+  const loadFirst = useCallback(async () => {
     setError("");
+    setLoading(true);
     try {
       const [d, c] = await Promise.all([
         api.publicGet<NovelCard>(`/reader/store/novels/${novelId}`),
-        api.publicGet<Catalog>(`/reader/novels/${novelId}/catalog`),
+        api.publicGet<CatalogPage>(`/reader/novels/${novelId}/catalog?page=1&page_size=${PAGE_SIZE}`),
       ]);
       setDetail(d);
-      setCatalog(c);
+      setNovelMeta(c.novel);
+      setChapters(c.chapters || []);
+      setPage(c.page || 1);
+      setTotal(c.total || 0);
+      setHasMore(!!c.has_more);
+      applyLocalProgress(c);
       if (user) {
         setFavorited(!!d.favorited);
         setLiked(!!d.liked);
-      } else {
-        setFavorited(getLocalFavIds().includes(+novelId));
-        setLiked(getLocalLikeIds().includes(+novelId));
-        const local = getLocalProgress().find((p) => p.novel_id === +novelId);
-        if (local && !c.progress_chapter_id) {
-          setCatalog({ ...c, progress_chapter_id: local.chapter_id });
-        }
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "加载失败");
       setDetail(null);
-      setCatalog(null);
+      setChapters([]);
     } finally {
       setLoading(false);
     }
-  }, [novelId, user]);
+  }, [novelId, user, applyLocalProgress]);
+
+  const loadMore = useCallback(async () => {
+    if (!hasMore || loadingMoreRef.current) return;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    try {
+      const next = page + 1;
+      const c = await api.publicGet<CatalogPage>(
+        `/reader/novels/${novelId}/catalog?page=${next}&page_size=${PAGE_SIZE}`
+      );
+      setChapters((prev) => {
+        const seen = new Set(prev.map((x) => x.id));
+        return [...prev, ...(c.chapters || []).filter((ch) => !seen.has(ch.id))];
+      });
+      setPage(c.page || next);
+      setTotal(c.total || total);
+      setHasMore(!!c.has_more);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "加载更多失败");
+    } finally {
+      setLoadingMore(false);
+      loadingMoreRef.current = false;
+    }
+  }, [hasMore, novelId, page, total]);
 
   useEffect(() => {
-    setLoading(true);
-    void load();
-  }, [load]);
+    void loadFirst();
+  }, [loadFirst]);
+
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) void loadMore();
+      },
+      { rootMargin: "240px" }
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [loadMore, hasMore, chapters.length]);
 
   async function toggleFav() {
     if (!user) {
@@ -129,7 +197,7 @@ export default function NovelDetailPage() {
       </div>
     );
   }
-  if (!detail || !catalog) {
+  if (!detail) {
     return (
       <div className="flex min-h-dvh flex-col items-center justify-center gap-3 px-6">
         <Empty text={error || "小说不存在"} />
@@ -141,7 +209,7 @@ export default function NovelDetailPage() {
   }
 
   let lastVolume: string | null = null;
-  const continueId = catalog.progress_chapter_id || catalog.chapters[0]?.id;
+  const continueId = progressChapterId || firstChapterId || chapters[0]?.id;
 
   return (
     <div className="min-h-dvh pb-28">
@@ -160,7 +228,7 @@ export default function NovelDetailPage() {
       <div className="mx-auto max-w-2xl px-4 pt-6">
         <div className="mb-6 flex gap-4">
           <div className="h-40 w-28 shrink-0 overflow-hidden rounded-md shadow-sm ring-1 ring-black/5">
-            <CoverImg url={detail.cover || catalog.novel.cover} title={detail.title} />
+            <CoverImg url={detail.cover || novelMeta?.cover || null} title={detail.title} />
           </div>
           <div className="min-w-0 flex-1">
             <h1 className="text-xl font-bold leading-snug">{detail.title}</h1>
@@ -198,15 +266,20 @@ export default function NovelDetailPage() {
 
         {detail.summary && <p className="mb-6 text-sm leading-6 text-black/55">{detail.summary}</p>}
 
-        <h2 className="mb-2 text-sm font-semibold">目录</h2>
-        {catalog.chapters.length === 0 ? (
+        <div className="mb-2 flex items-baseline justify-between">
+          <h2 className="text-sm font-semibold">目录</h2>
+          <span className="text-[11px] text-black/35">
+            已加载 {chapters.length}/{total}
+          </span>
+        </div>
+        {chapters.length === 0 ? (
           <Empty text="还没有审核通过的章节" />
         ) : (
           <div className="overflow-hidden rounded-2xl bg-white/80 shadow-sm ring-1 ring-black/5">
-            {catalog.chapters.map((c) => {
+            {chapters.map((c) => {
               const showVolume = c.volume_title && c.volume_title !== lastVolume;
               lastVolume = c.volume_title;
-              const isProgress = c.id === catalog.progress_chapter_id;
+              const isProgress = c.id === progressChapterId;
               return (
                 <div key={c.id}>
                   {showVolume && (
@@ -229,6 +302,18 @@ export default function NovelDetailPage() {
             })}
           </div>
         )}
+        <div ref={sentinelRef} className="flex h-16 items-center justify-center">
+          {loadingMore ? (
+            <span className="text-xs text-black/35">加载更多章节…</span>
+          ) : hasMore ? (
+            <button type="button" onClick={() => void loadMore()} className="text-xs text-amber-700">
+              下拉或点击加载更多
+            </button>
+          ) : chapters.length > 0 ? (
+            <span className="text-xs text-black/30">已全部加载</span>
+          ) : null}
+        </div>
+        {error && <p className="mb-4 text-center text-xs text-rose-600">{error}</p>}
       </div>
 
       {continueId && (
@@ -238,7 +323,7 @@ export default function NovelDetailPage() {
               href={`/${novelId}/${continueId}`}
               className="flex h-12 items-center justify-center rounded-full bg-[#e8772a] text-base font-medium text-white shadow-md"
             >
-              {catalog.progress_chapter_id ? "继续阅读" : "开始阅读"}
+              {progressChapterId ? "继续阅读" : "开始阅读"}
             </Link>
           </div>
         </div>

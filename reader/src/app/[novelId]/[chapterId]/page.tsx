@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { api, upsertLocalProgress } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { Spinner } from "@/components/ui";
@@ -12,6 +12,10 @@ interface ChapterData {
   title: string;
   content: string;
   word_count: number;
+  full_char_count?: number;
+  page: number;
+  total_pages: number;
+  has_more: boolean;
   prev_id: number | null;
   next_id: number | null;
 }
@@ -25,7 +29,23 @@ const THEMES = [
 type ThemeKey = (typeof THEMES)[number]["key"];
 
 export default function ReaderChapterPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex min-h-dvh items-center justify-center bg-[#f7f3ea]">
+          <Spinner />
+        </div>
+      }
+    >
+      <ReaderChapterInner />
+    </Suspense>
+  );
+}
+
+function ReaderChapterInner() {
   const { novelId, chapterId } = useParams<{ novelId: string; chapterId: string }>();
+  const searchParams = useSearchParams();
+  const pageParam = Math.max(1, Number(searchParams.get("page") || "1") || 1);
   const { user } = useAuth();
   const router = useRouter();
   const [chapter, setChapter] = useState<ChapterData | null>(null);
@@ -73,20 +93,25 @@ export default function ReaderChapterPage() {
       setSpeaking(false);
     }
     try {
-      setChapter(await api.publicGet<ChapterData>(`/reader/novels/${novelId}/chapters/${chapterId}`));
+      const data = await api.publicGet<ChapterData>(
+        `/reader/novels/${novelId}/chapters/${chapterId}?page=${pageParam}`
+      );
+      setChapter(data);
       setChromeVisible(true);
       window.scrollTo(0, 0);
-      void reportProgress(0);
+      const total = Math.max(1, data.total_pages || 1);
+      const pagePct = Math.min(99, Math.round(((data.page - 1) / total) * 100));
+      void reportProgress(pagePct);
     } catch (e) {
       setChapter(null);
       setError(e instanceof Error ? e.message : "加载失败");
     } finally {
       setLoading(false);
     }
-  }, [novelId, chapterId, reportProgress]);
+  }, [novelId, chapterId, pageParam, reportProgress]);
 
   useEffect(() => {
-    load();
+    void load();
   }, [load]);
 
   useEffect(() => {
@@ -102,14 +127,24 @@ export default function ReaderChapterPage() {
       else if (y > lastScrollY.current + 8) setChromeVisible(false);
       else if (y < lastScrollY.current - 8) setChromeVisible(true);
       lastScrollY.current = y;
+      if (!chapter) return;
       const doc = document.documentElement;
       const max = Math.max(1, doc.scrollHeight - window.innerHeight);
-      const pct = Math.min(100, Math.round((y / max) * 100));
+      const within = Math.min(100, Math.round((y / max) * 100));
+      const total = Math.max(1, chapter.total_pages || 1);
+      const base = ((chapter.page - 1) / total) * 100;
+      const span = 100 / total;
+      const pct = Math.min(100, Math.round(base + (within / 100) * span));
       void reportProgress(pct);
     };
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
-  }, [reportProgress]);
+  }, [reportProgress, chapter]);
+
+  function goPage(p: number) {
+    const q = p > 1 ? `?page=${p}` : "";
+    router.push(`/${novelId}/${chapterId}${q}`);
+  }
 
   function toggleSpeak() {
     if (!chapter) return;
@@ -158,6 +193,11 @@ export default function ReaderChapterPage() {
     );
   }
 
+  const totalPages = Math.max(1, chapter.total_pages || 1);
+  const curPage = chapter.page || 1;
+  const hasPrevPage = curPage > 1;
+  const hasNextPage = curPage < totalPages;
+
   return (
     <div className="min-h-dvh select-text" style={{ background: themeMeta.bg, color: themeMeta.fg }}>
       <div
@@ -182,17 +222,26 @@ export default function ReaderChapterPage() {
       </div>
 
       <article
-        className="mx-auto max-w-2xl px-5 pb-32 pt-[calc(3.5rem+env(safe-area-inset-top))]"
+        className="mx-auto max-w-2xl px-5 pb-36 pt-[calc(3.5rem+env(safe-area-inset-top))]"
         onClick={() => setChromeVisible((v) => !v)}
       >
-        <h1 className="mb-8 text-center text-[1.35rem] font-semibold leading-snug tracking-wide">{chapter.title}</h1>
+        <h1 className="mb-2 text-center text-[1.35rem] font-semibold leading-snug tracking-wide">{chapter.title}</h1>
+        {totalPages > 1 && (
+          <p className="mb-8 text-center text-xs opacity-40">
+            第 {curPage}/{totalPages} 页
+          </p>
+        )}
+        {totalPages <= 1 && <div className="mb-8" />}
         <div
           className="whitespace-pre-wrap break-words"
           style={{ fontSize, lineHeight: 1.95, letterSpacing: "0.02em", textAlign: "justify" }}
         >
           {chapter.content}
         </div>
-        <p className="mt-10 text-center text-xs opacity-35">{chapter.word_count} 字</p>
+        <p className="mt-10 text-center text-xs opacity-35">
+          {chapter.word_count} 字
+          {totalPages > 1 ? ` · 本页 ${chapter.content.length} 字` : ""}
+        </p>
       </article>
 
       <div
@@ -242,8 +291,22 @@ export default function ReaderChapterPage() {
               A+
             </button>
           </div>
+
+          {totalPages > 1 && (
+            <p className="mb-1.5 text-center text-[11px] opacity-40">
+              正文分页 {curPage}/{totalPages}
+            </p>
+          )}
           <div className="grid grid-cols-2 gap-2">
-            {chapter.prev_id ? (
+            {hasPrevPage ? (
+              <button
+                type="button"
+                onClick={() => goPage(curPage - 1)}
+                className={`flex h-11 items-center justify-center rounded-full text-sm ${theme === "dark" ? "bg-white/10" : "bg-black/5"}`}
+              >
+                上一页
+              </button>
+            ) : chapter.prev_id ? (
               <Link
                 href={`/${novelId}/${chapter.prev_id}`}
                 className={`flex h-11 items-center justify-center rounded-full text-sm ${theme === "dark" ? "bg-white/10" : "bg-black/5"}`}
@@ -255,7 +318,15 @@ export default function ReaderChapterPage() {
                 已是第一章
               </span>
             )}
-            {chapter.next_id ? (
+            {hasNextPage ? (
+              <button
+                type="button"
+                onClick={() => goPage(curPage + 1)}
+                className="flex h-11 items-center justify-center rounded-full bg-[#e8772a] text-sm font-medium text-white"
+              >
+                下一页
+              </button>
+            ) : chapter.next_id ? (
               <Link
                 href={`/${novelId}/${chapter.next_id}`}
                 className="flex h-11 items-center justify-center rounded-full bg-[#e8772a] text-sm font-medium text-white"
