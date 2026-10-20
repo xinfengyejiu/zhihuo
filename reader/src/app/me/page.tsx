@@ -19,7 +19,7 @@ export default function MePage() {
             <p className="text-xs text-black/40">@{user.username}</p>
           </div>
           <Link href="/library" className="block rounded-xl bg-black/[0.04] px-4 py-3 text-sm">
-            我的书城
+            我的书架
           </Link>
           <Button variant="outline" className="w-full" onClick={logout}>
             退出登录

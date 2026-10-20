@@ -89,20 +89,28 @@ export function Modal({
 }) {
   if (!open) return null;
   // 只能通过标题栏 ✕ 或表单里的 保存/取消 按钮关闭,点击遮罩不关闭,避免误触丢内容
+  // 手机:<md 近全屏;桌面保持原宽高
+  const panelSize =
+    wide || tall
+      ? "h-dvh max-h-dvh w-full max-w-none rounded-none p-4 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] md:h-[min(92vh,900px)] md:max-h-[92vh] md:max-w-6xl md:rounded-xl md:p-5"
+      : "max-h-[min(92dvh,88vh)] w-full max-w-lg rounded-xl p-4 sm:p-5";
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div
-        className={`flex w-full flex-col overflow-hidden rounded-xl bg-white p-5 shadow-xl ${
-          tall ? "h-[min(92vh,900px)] max-h-[92vh]" : "max-h-[88vh]"
-        } ${wide || tall ? "max-w-6xl" : "max-w-lg"}`}
-      >
-        <div className="mb-4 flex shrink-0 items-center justify-between">
-          <h3 className="text-base font-semibold text-slate-800">{title}</h3>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
+    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/40 p-0 md:items-center md:p-4">
+      <div className={`flex w-full flex-col overflow-hidden bg-white shadow-xl ${panelSize}`}>
+        <div className="mb-3 flex shrink-0 items-center justify-between gap-2 md:mb-4">
+          <h3 className="min-w-0 truncate text-base font-semibold text-slate-800">{title}</h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-50 hover:text-slate-600"
+            aria-label="关闭"
+          >
             ✕
           </button>
         </div>
-        <div className={`min-h-0 ${tall ? "flex flex-1 flex-col overflow-hidden" : "overflow-auto"}`}>{children}</div>
+        <div className={`min-h-0 ${tall || wide ? "flex flex-1 flex-col overflow-hidden" : "overflow-auto"}`}>
+          {children}
+        </div>
       </div>
     </div>
   );

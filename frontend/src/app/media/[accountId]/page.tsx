@@ -379,7 +379,7 @@ export default function MediaWorkspacePage() {
             {account.token_status === "ready" ? " · 凭证已就绪" : " · 请先在账号页配置 Token"}
           </p>
         </div>
-        <div className="flex gap-1 rounded-lg bg-slate-100 p-1 text-sm">
+        <div className="-mx-1 flex max-w-full gap-1 overflow-x-auto rounded-lg bg-slate-100 p-1 text-sm scrollbar-none">
           {(
             [
               ["chat", "创作"],
@@ -392,7 +392,7 @@ export default function MediaWorkspacePage() {
             <button
               key={k}
               onClick={() => setTab(k)}
-              className={`rounded-md px-3 py-1.5 font-medium ${tab === k ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500"}`}
+              className={`shrink-0 rounded-md px-3 py-1.5 font-medium ${tab === k ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500"}`}
             >
               {label}
             </button>
@@ -404,8 +404,12 @@ export default function MediaWorkspacePage() {
 
       {tab === "chat" && (
         <div className="flex flex-col rounded-xl border border-slate-200 bg-white" style={{ minHeight: "28rem" }}>
-          <div className="flex flex-wrap gap-2 border-b border-slate-100 p-3 text-xs">
-            <Select value={topicId ?? ""} onChange={(e) => setTopicId(e.target.value ? +e.target.value : null)} className="min-w-[10rem]">
+          <div className="flex flex-col gap-2 border-b border-slate-100 p-3 text-xs sm:flex-row sm:flex-wrap">
+            <Select
+              value={topicId ?? ""}
+              onChange={(e) => setTopicId(e.target.value ? +e.target.value : null)}
+              className="w-full sm:min-w-[10rem] sm:w-auto"
+            >
               <option value="">不指定选题</option>
               {topics.map((t) => (
                 <option key={t.id} value={t.id}>
@@ -413,7 +417,11 @@ export default function MediaWorkspacePage() {
                 </option>
               ))}
             </Select>
-            <Select value={skillId ?? ""} onChange={(e) => setSkillId(e.target.value ? +e.target.value : null)} className="min-w-[8rem]">
+            <Select
+              value={skillId ?? ""}
+              onChange={(e) => setSkillId(e.target.value ? +e.target.value : null)}
+              className="w-full sm:min-w-[8rem] sm:w-auto"
+            >
               <option value="">默认 Skill</option>
               {skills.map((s) => (
                 <option key={s.id} value={s.id}>
@@ -427,7 +435,7 @@ export default function MediaWorkspacePage() {
                 setProviderId(e.target.value ? +e.target.value : null);
                 setModelId(null);
               }}
-              className="min-w-[7rem]"
+              className="w-full sm:min-w-[7rem] sm:w-auto"
             >
               <option value="">默认模型</option>
               {providers.map((p) => (
@@ -437,7 +445,11 @@ export default function MediaWorkspacePage() {
               ))}
             </Select>
             {providerId && (
-              <Select value={modelId ?? ""} onChange={(e) => setModelId(e.target.value || null)} className="min-w-[9rem]">
+              <Select
+                value={modelId ?? ""}
+                onChange={(e) => setModelId(e.target.value || null)}
+                className="w-full sm:min-w-[9rem] sm:w-auto"
+              >
                 <option value="">选择模型</option>
                 {models.filter((m) => m.enabled).map((m) => {
                   const tag = modalityLabel(m.modality);

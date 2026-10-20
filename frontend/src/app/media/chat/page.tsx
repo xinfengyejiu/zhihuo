@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ChatMediaContent, listImagePlaceholders, modalityLabel } from "@/components/ChatMediaContent";
+import { ChatSessionDrawer } from "@/components/ChatSessionDrawer";
 import { api, streamSSE } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { loadMediaChatPrefs, saveMediaChatPrefs } from "@/lib/chatPrefs";
@@ -64,6 +65,7 @@ export default function MediaChatPage() {
   const [msg, setMsg] = useState("");
   const [ready, setReady] = useState(false);
   const [renamingId, setRenamingId] = useState<number | null>(null);
+  const [sessionDrawerOpen, setSessionDrawerOpen] = useState(false);
   const [renameText, setRenameText] = useState("");
   const [saving, setSaving] = useState(false);
   const [fillingMsgId, setFillingMsgId] = useState<number | "last" | null>(null);
@@ -494,10 +496,13 @@ export default function MediaChatPage() {
         }}
       />
       {inConversation && (
-        <aside className="w-60 shrink-0 overflow-y-auto border-r border-slate-200 bg-white">
+        <ChatSessionDrawer open={sessionDrawerOpen} onClose={() => setSessionDrawerOpen(false)} className="md:w-60">
           <div className="p-3">
             <button
-              onClick={backToLanding}
+              onClick={() => {
+                setSessionDrawerOpen(false);
+                backToLanding();
+              }}
               className="w-full rounded-lg bg-indigo-600 py-2 text-sm font-medium text-white hover:bg-indigo-700"
             >
               + 新的对话
@@ -526,7 +531,10 @@ export default function MediaChatPage() {
                       className={`group flex cursor-pointer items-center justify-between rounded-lg px-3 py-2 text-sm ${
                         activeId === s.id ? "bg-indigo-50 text-indigo-700" : "text-slate-600 hover:bg-slate-50"
                       }`}
-                      onClick={() => openSession(s.id)}
+                      onClick={() => {
+                        setSessionDrawerOpen(false);
+                        openSession(s.id);
+                      }}
                     >
                       <span className="truncate">
                         {s.title}
@@ -562,21 +570,30 @@ export default function MediaChatPage() {
               );
             })}
           </ul>
-        </aside>
+        </ChatSessionDrawer>
       )}
 
       <div className="flex min-w-0 flex-1 flex-col">
         {inConversation ? (
           <>
-            <div className="flex items-center justify-between gap-2 border-b border-slate-200 bg-white px-4 py-2">
-              <span className="truncate text-sm font-medium text-slate-600">
-                {sessions.find((s) => s.id === activeId)?.title || "对话"}
-              </span>
+            <div className="flex items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 py-2 sm:px-4">
+              <div className="flex min-w-0 items-center gap-2">
+                <button
+                  type="button"
+                  className="inline-flex h-8 shrink-0 items-center rounded-lg border border-slate-200 px-2 text-xs text-slate-600 md:hidden"
+                  onClick={() => setSessionDrawerOpen(true)}
+                >
+                  会话
+                </button>
+                <span className="truncate text-sm font-medium text-slate-600">
+                  {sessions.find((s) => s.id === activeId)?.title || "对话"}
+                </span>
+              </div>
               <div className="flex shrink-0 items-center gap-2">
-                <Link href="/media" className="text-xs text-slate-400 hover:text-indigo-600">
+                <Link href="/media" className="hidden text-xs text-slate-400 hover:text-indigo-600 sm:inline">
                   管理账号
                 </Link>
-                <Link href="/media/topics" className="text-xs text-slate-400 hover:text-indigo-600">
+                <Link href="/media/topics" className="hidden text-xs text-slate-400 hover:text-indigo-600 sm:inline">
                   选题库
                 </Link>
                 <button
@@ -680,7 +697,7 @@ export default function MediaChatPage() {
               </div>
             </div>
 
-            <div className="border-t border-slate-200 bg-white px-4 py-3">
+            <div className="border-t border-slate-200 bg-white px-3 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-4">
               <div className="mx-auto max-w-3xl">
                 <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-slate-400">
                   <select

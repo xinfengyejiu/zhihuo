@@ -43,6 +43,53 @@ from ..security import (
 )
 router = APIRouter(prefix="/reader", tags=["reader-store"])
 
+# 固定一级分类:key -> 展示名 + 标签别名(大小写不敏感,书的任意标签命中即归入)
+STORE_CATEGORIES: list[dict[str, object]] = [
+    {"key": "all", "label": "全部", "tag_aliases": []},
+    {"key": "dushi", "label": "都市", "tag_aliases": ["都市", "都市生活", "都市日常", "现代都市"]},
+    {"key": "xuanhuan", "label": "玄幻", "tag_aliases": ["玄幻", "奇幻", "修真", "仙侠", "玄幻修真"]},
+    {"key": "naodong", "label": "脑洞", "tag_aliases": ["脑洞", "脑洞大开", "创意", "无限"]},
+    {"key": "chuanyue", "label": "穿越", "tag_aliases": ["穿越", "穿越重生", "重生", "穿越时空"]},
+    {"key": "xitong", "label": "系统", "tag_aliases": ["系统", "系统流", "金手指"]},
+    {"key": "yanqing", "label": "言情", "tag_aliases": ["言情", "甜宠", "现代言情", "古代言情", "恋爱"]},
+    {"key": "lishi", "label": "历史", "tag_aliases": ["历史", "架空历史", "历史军事", "军事"]},
+    {"key": "kehuan", "label": "科幻", "tag_aliases": ["科幻", "未来", "星际", "末世"]},
+]
+
+
+def _category_public() -> list[dict[str, str]]:
+    return [{"key": str(c["key"]), "label": str(c["label"])} for c in STORE_CATEGORIES]
+
+
+def _category_aliases(key: str) -> list[str] | None:
+    """None = 全部不过滤; [] = 未知 key 视为全部。"""
+    k = (key or "all").strip().lower()
+    if k in ("", "all", "全部"):
+        return None
+    for c in STORE_CATEGORIES:
+        ck = str(c["key"]).lower()
+        label = str(c["label"])
+        if k == ck or k == label.lower() or k == label:
+            aliases = c.get("tag_aliases") or []
+            return [str(a) for a in aliases]  # type: ignore[arg-type]
+    # 允许直接用中文 label 当 key
+    for c in STORE_CATEGORIES:
+        if str(c["label"]) == (key or "").strip():
+            aliases = c.get("tag_aliases") or []
+            return [str(a) for a in aliases]  # type: ignore[arg-type]
+    return None
+
+
+def _novel_in_category(tags: list[str], category: str | None) -> bool:
+    aliases = _category_aliases(category or "all")
+    if aliases is None:
+        return True
+    if not aliases:
+        return True
+    tag_set = {t.strip().lower() for t in tags if t and t.strip()}
+    alias_set = {a.strip().lower() for a in aliases if a and a.strip()}
+    return bool(tag_set & alias_set)
+
 
 def _now():
     return model_now()
@@ -194,8 +241,14 @@ def reader_me(user: ReaderUser = Depends(get_current_reader)):
 
 
 # ---------- Store ----------
+@router.get("/store/categories")
+def store_categories():
+    return {"categories": _category_public()}
+
+
 @router.get("/store/home")
 def store_home(
+    category: str = Query("all"),
     reader: ReaderUser | None = Depends(get_optional_reader),
     db: Session = Depends(get_db),
 ):
@@ -211,9 +264,11 @@ def store_home(
         )
         continue_reading = _cards_for_progress(db, progresses, reader)
 
-    hot = _list_novels(db, sort="hot", limit=12, reader=reader)
-    newest = _list_novels(db, sort="new", limit=12, reader=reader)
+    hot = _list_novels(db, sort="hot", limit=12, category=category, reader=reader)
+    newest = _list_novels(db, sort="new", limit=12, category=category, reader=reader)
     for_you = _recommend(db, reader, limit=12)
+    rank = _list_novels(db, sort="hot", limit=8, category=category, reader=reader)
+    featured = for_you if (category or "all").strip().lower() in ("", "all", "全部") else hot[:8]
 
     # 标签:从公开书关联的标签聚合
     tag_rows = (
@@ -232,7 +287,41 @@ def store_home(
         "hot": hot,
         "newest": newest,
         "for_you": for_you,
+        "rank": rank,
+        "featured": featured,
+        "categories": _category_public(),
+        "category": category or "all",
         "tags": tags,
+    }
+
+
+@router.get("/store/rank")
+def store_rank(
+    category: str = Query("all"),
+    sort: str = Query("hot", pattern="^(hot|new|likes)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=60),
+    reader: ReaderUser | None = Depends(get_optional_reader),
+    db: Session = Depends(get_db),
+):
+    offset = (page - 1) * page_size
+    books = _list_novels(
+        db,
+        category=category,
+        sort=sort,
+        limit=page_size,
+        offset=offset,
+        reader=reader,
+    )
+    return {
+        "category": category or "all",
+        "sort": sort,
+        "page": page,
+        "page_size": page_size,
+        "items": [
+            {**b.model_dump(), "rank": offset + i + 1}
+            for i, b in enumerate(books)
+        ],
     }
 
 
@@ -240,6 +329,7 @@ def store_home(
 def store_novels(
     q: str | None = None,
     tag: str | None = None,
+    category: str | None = None,
     sort: str = Query("hot", pattern="^(hot|new|likes)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(24, ge=1, le=60),
@@ -250,6 +340,7 @@ def store_novels(
         db,
         q=q,
         tag=tag,
+        category=category,
         sort=sort,
         limit=page_size,
         offset=(page - 1) * page_size,
@@ -281,6 +372,7 @@ def _list_novels(
     *,
     q: str | None = None,
     tag: str | None = None,
+    category: str | None = None,
     sort: str = "hot",
     limit: int = 24,
     offset: int = 0,
@@ -302,6 +394,18 @@ def _list_novels(
     novels = query.all()
     if not novels:
         return []
+
+    # 一级分类:按标签别名过滤(全部不过滤)
+    aliases = _category_aliases(category or "all")
+    if aliases is not None:
+        filtered: list[Novel] = []
+        for n in novels:
+            if _novel_in_category(_tag_names(db, n.id), category):
+                filtered.append(n)
+        novels = filtered
+        if not novels:
+            return []
+
     agg = _chapter_agg(db, [n.id for n in novels])
     stats = _stats_map(db, [n.id for n in novels])
 

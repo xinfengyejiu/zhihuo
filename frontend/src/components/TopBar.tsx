@@ -76,7 +76,7 @@ export default function TopBar() {
   }
 
   return (
-    <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">
+    <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/95 pt-[env(safe-area-inset-top)] backdrop-blur">
       <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-3 px-3 sm:px-4">
         <div className="flex min-w-0 items-center gap-2 sm:gap-4">
           <button
@@ -191,8 +191,33 @@ export default function TopBar() {
       </div>
 
       {menuOpen && (
-        <div className="border-t border-slate-100 bg-white px-3 py-2 md:hidden">
+        <div className="border-t border-slate-100 bg-white px-3 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] md:hidden">
           <nav className="flex flex-col gap-1">
+            {user && products.length > 0 && (
+              <div className="mb-2 rounded-lg border border-slate-100 bg-slate-50 p-2">
+                <p className="mb-1.5 px-1 text-[11px] font-medium text-slate-400">切换产品</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {products.map((p) => (
+                    <button
+                      key={p.key}
+                      type="button"
+                      className={`rounded-full px-3 py-1.5 text-xs ${
+                        (current || "novel") === p.key
+                          ? "bg-indigo-600 text-white"
+                          : "bg-white text-slate-600 ring-1 ring-slate-200"
+                      }`}
+                      onClick={() => {
+                        setMenuOpen(false);
+                        setCurrent(p.key);
+                        window.location.href = p.href;
+                      }}
+                    >
+                      {p.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <Link href="/hub" className={navClass("/hub")} onClick={() => setMenuOpen(false)}>
               产品台
             </Link>
@@ -202,16 +227,21 @@ export default function TopBar() {
               </Link>
             ))}
             {user && (
-              <button
-                type="button"
-                className="rounded-lg px-3 py-2 text-left text-sm text-slate-600 hover:bg-slate-50"
-                onClick={() => {
-                  setMenuOpen(false);
-                  logout();
-                }}
-              >
-                退出登录
-              </button>
+              <>
+                <Link href="/profile" className={navClass("/profile")} onClick={() => setMenuOpen(false)}>
+                  个人中心
+                </Link>
+                <button
+                  type="button"
+                  className="rounded-lg px-3 py-2 text-left text-sm text-slate-600 hover:bg-slate-50"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    logout();
+                  }}
+                >
+                  退出登录
+                </button>
+              </>
             )}
           </nav>
         </div>

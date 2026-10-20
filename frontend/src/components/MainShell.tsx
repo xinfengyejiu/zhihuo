@@ -6,10 +6,15 @@ import { usePathname } from "next/navigation";
 export function MainShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   if (pathname?.startsWith("/reader/")) {
-    return <main className="min-h-screen">{children}</main>;
+    return <main className="min-h-dvh">{children}</main>;
   }
   if (pathname === "/" || pathname === "/media/chat" || pathname === "/drama/chat") {
-    return <main className="h-[calc(100dvh-3.5rem)] overflow-hidden bg-slate-50">{children}</main>;
+    // TopBar ≈ 3.5rem + safe-area-top; 聊天页占满剩余视口
+    return (
+      <main className="h-[calc(100dvh-3.5rem-env(safe-area-inset-top,0px))] overflow-hidden bg-slate-50">
+        {children}
+      </main>
+    );
   }
   if (pathname === "/login") {
     return <main className="mx-auto max-w-md px-4 py-10">{children}</main>;

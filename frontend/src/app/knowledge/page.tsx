@@ -237,7 +237,7 @@ export default function KnowledgePage() {
         <Empty text={`还没有「${productLabel}」或共享知识库`} />
       ) : (
         <div className="grid gap-4 lg:grid-cols-[280px_1fr]">
-          <div className="space-y-2">
+          <div className={`space-y-2 ${activeId ? "hidden lg:block" : ""}`}>
             {visibleKbs.map((kb) => (
               <button
                 key={kb.id}
@@ -268,10 +268,17 @@ export default function KnowledgePage() {
             ))}
           </div>
 
-          <div className="space-y-4">
+          <div className={`space-y-4 ${!activeId ? "hidden lg:block" : ""}`}>
             {active ? (
               <>
                 <div className="rounded-xl border border-slate-200 bg-white p-4">
+                  <button
+                    type="button"
+                    className="mb-3 text-sm text-slate-500 lg:hidden"
+                    onClick={() => setActiveId(null)}
+                  >
+                    ← 返回知识库列表
+                  </button>
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <h3 className="text-sm font-semibold">{active.name}</h3>
                     <div className="flex flex-wrap gap-2">

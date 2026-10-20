@@ -25,10 +25,19 @@ export interface NovelCard {
   progress_updated_at?: string | null;
 }
 
+export interface CategoryItem {
+  key: string;
+  label: string;
+}
+
 export interface StoreHome {
   continue_reading: NovelCard[];
   hot: NovelCard[];
   newest: NovelCard[];
   for_you: NovelCard[];
+  rank: NovelCard[];
+  featured: NovelCard[];
+  categories: CategoryItem[];
+  category: string;
   tags: { name: string; count: number }[];
 }

@@ -33,6 +33,8 @@ export default function ChapterEditorPage() {
   const { getTask, startTask, clearTask } = useTasks();
   const [mode, setMode] = useState<Mode>("chapter");
   const [instruction, setInstruction] = useState("");
+  /** 手机端 AI 抽屉开关;桌面始终显示 */
+  const [aiPanelOpen, setAiPanelOpen] = useState(false);
   const genTask = getTask(`gen-${chapterId}`);
   const aiBusy = genTask?.status === "running";
   const aiOutput = genTask?.output ?? "";
@@ -408,12 +410,12 @@ export default function ChapterEditorPage() {
   const aiDraftVersion = chapter.versions.find((v) => v.kind === "ai_draft");
 
   return (
-    <div className="flex h-[calc(100vh-8rem)] gap-4">
+    <div className="relative flex h-[calc(100dvh-7.5rem)] flex-col gap-3 md:h-[calc(100dvh-8rem)] md:flex-row md:gap-4">
       {/* 左:编辑器 + 章末自检 */}
-      <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-2.5">
-          <div className="flex items-center gap-2">
-            <h2 className="font-semibold">{chapter.title}</h2>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-3 py-2 sm:px-4 sm:py-2.5">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <h2 className="truncate font-semibold">{chapter.title}</h2>
             <ChapterStatusBadge status={chapter.status} />
             <span className="text-xs text-slate-400">{editor?.getText().length || 0} 字</span>
             {dirty && <span className="text-xs text-amber-500">未保存</span>}
@@ -432,16 +434,20 @@ export default function ChapterEditorPage() {
               </span>
             )}
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="-mx-1 flex max-w-full items-center gap-1.5 overflow-x-auto px-1 pb-0.5">
+            <Button size="sm" className="md:hidden" onClick={() => setAiPanelOpen(true)}>
+              AI{aiBusy ? "…" : ""}
+            </Button>
             <Button size="sm" variant="ghost" onClick={() => setMetaOpen(true)}>章纲</Button>
             <Button size="sm" variant="ghost" onClick={() => setVersionsOpen(true)}>版本</Button>
-            <Button size="sm" variant="ghost" onClick={openReports}>复盘</Button>
+            <Button size="sm" variant="ghost" className="hidden sm:inline-flex" onClick={openReports}>复盘</Button>
             <Button size="sm" variant="ghost" onClick={() => runSelfCheck()} disabled={selfChecking}>
               {selfChecking ? "自检中…" : "自检"}
             </Button>
             <Button
               size="sm"
               variant="ghost"
+              className="hidden sm:inline-flex"
               onClick={() => router.push(`/novels/${id}/chat?chapter_id=${chapterId}`)}
             >
               书内对话
@@ -455,6 +461,7 @@ export default function ChapterEditorPage() {
               <Button
                 size="sm"
                 variant="ghost"
+                className="hidden sm:inline-flex"
                 onClick={() => {
                   window.open(readerNovelUrl(id, chapterId), "_blank", "noopener,noreferrer");
                 }}
@@ -476,9 +483,10 @@ export default function ChapterEditorPage() {
                     onClick={() => {
                       setMode("fix_reject");
                       setInstruction(rejectComment.slice(0, 2000));
+                      setAiPanelOpen(true);
                     }}
                   >
-                    用右侧「按驳回改」修改 →
+                    用「按驳回改」修改 →
                   </button>
                 )}
               </div>
@@ -617,10 +625,34 @@ export default function ChapterEditorPage() {
         )}
       </div>
 
-      {/* 右:AI 面板 */}
-      <div className="flex w-96 shrink-0 flex-col rounded-xl border border-slate-200 bg-white">
+      {/* 手机:AI 抽屉遮罩 */}
+      {aiPanelOpen && (
+        <button
+          type="button"
+          className="fixed inset-0 z-40 bg-black/40 md:hidden"
+          aria-label="关闭 AI 面板"
+          onClick={() => setAiPanelOpen(false)}
+        />
+      )}
+
+      {/* 右:AI 面板 — 桌面常驻;手机底部/侧滑抽屉 */}
+      <div
+        className={`flex flex-col border-slate-200 bg-white ${
+          aiPanelOpen ? "fixed inset-x-0 bottom-0 z-50 h-[min(88dvh,720px)] rounded-t-2xl border-t shadow-2xl md:static md:z-auto md:h-auto md:rounded-xl md:border md:shadow-none" : "hidden md:flex"
+        } md:w-96 md:shrink-0 md:rounded-xl md:border`}
+      >
         <div className="border-b border-slate-100 px-4 py-3">
-          <h3 className="text-sm font-semibold">AI 写作</h3>
+          <div className="mb-2 flex items-center justify-between md:mb-0">
+            <h3 className="text-sm font-semibold">AI 写作</h3>
+            <button
+              type="button"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-50 md:hidden"
+              onClick={() => setAiPanelOpen(false)}
+              aria-label="关闭"
+            >
+              ✕
+            </button>
+          </div>
           <div className={`mt-2 grid gap-1 ${visibleModes.length >= 5 ? "grid-cols-5" : "grid-cols-4"}`}>
             {visibleModes.map((m) => (
               <button

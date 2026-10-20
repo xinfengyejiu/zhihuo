@@ -4,9 +4,26 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 const ITEMS = [
-  { href: "/", label: "发现", match: (p: string) => p === "/" || p.startsWith("/search") },
-  { href: "/library", label: "我的书城", match: (p: string) => p.startsWith("/library") },
-  { href: "/me", label: "我的", match: (p: string) => p.startsWith("/me") || p.startsWith("/login") || p.startsWith("/register") },
+  {
+    href: "/library",
+    label: "书架",
+    match: (p: string) => p.startsWith("/library"),
+  },
+  {
+    href: "/",
+    label: "书城",
+    match: (p: string) => p === "/" || p.startsWith("/search"),
+  },
+  {
+    href: "/category",
+    label: "分类",
+    match: (p: string) => p.startsWith("/category"),
+  },
+  {
+    href: "/me",
+    label: "我的",
+    match: (p: string) => p.startsWith("/me") || p.startsWith("/login") || p.startsWith("/register"),
+  },
 ];
 
 export function BottomNav() {

@@ -84,7 +84,7 @@ export default function LibraryPage() {
 
   return (
     <div className="mx-auto max-w-2xl px-4 pb-8 pt-[max(1rem,env(safe-area-inset-top))]">
-      <h1 className="mb-1 text-xl font-bold">我的书城</h1>
+      <h1 className="mb-1 text-xl font-bold">书架</h1>
       <p className="mb-4 text-xs text-black/40">
         {user ? `你好,${user.nickname || user.username}` : "游客模式 · 登录后可云端同步"}
       </p>

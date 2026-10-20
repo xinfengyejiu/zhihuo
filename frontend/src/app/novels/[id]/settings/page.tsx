@@ -58,12 +58,12 @@ export default function SettingsPage() {
 
   return (
     <div>
-      <div className="mb-4 flex flex-wrap gap-1 rounded-lg bg-slate-100 p-1 text-sm">
+      <div className="mb-4 -mx-1 flex gap-1 overflow-x-auto rounded-lg bg-slate-100 p-1 text-sm scrollbar-none">
         {tabs.map(([key, label]) => (
           <button
             key={key}
             onClick={() => setTab(key)}
-            className={`min-w-[5.5rem] flex-1 rounded-md py-1.5 font-medium transition ${tab === key ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500"}`}
+            className={`shrink-0 rounded-md px-3 py-1.5 font-medium transition sm:min-w-[5.5rem] sm:flex-1 ${tab === key ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500"}`}
           >
             {label}
           </button>

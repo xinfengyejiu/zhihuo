@@ -351,9 +351,9 @@ export default function ReviewPage() {
 
   return (
     <div>
-      <div className="mb-4 flex items-center justify-between">
+      <div className="mb-4 flex items-center justify-between gap-2">
         <h1 className="text-xl font-bold">审核台</h1>
-        <span className="text-sm text-slate-400">章节必须审核通过后才会进入发布列表和阅读器</span>
+        <span className="hidden text-sm text-slate-400 sm:inline">章节必须审核通过后才会进入发布列表和阅读器</span>
       </div>
       <ErrorText>{error}</ErrorText>
 
@@ -491,32 +491,74 @@ export default function ReviewPage() {
 
               <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-indigo-100 bg-indigo-50/40">
                 <div className="shrink-0 border-b border-indigo-100/80 p-3">
-                  <div className="flex items-center justify-between gap-2">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                     <h3 className="text-sm font-semibold text-indigo-800">AI 审查官</h3>
-                    <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-                      {reviewReport && (
-                        <Button size="sm" variant="outline" onClick={() => setReportExpanded(true)}>
-                          展开报告
-                        </Button>
-                      )}
-                      {skills.length === 0 && !reviewing && (
-                        <Button size="sm" variant="outline" onClick={ensureReviewSkills}>
-                          导入审查技能
-                        </Button>
-                      )}
+                    <div className="flex flex-wrap items-center gap-2">
                       <Button size="sm" onClick={runAiReview} disabled={reviewing}>
                         {reviewing ? "审查中…" : reviewDone ? "重新审查" : "开始 AI 审查"}
                       </Button>
                       {reviewReport && detail.chapter.status === "pending_review" && (
-                        <>
-                          <Button size="sm" variant="outline" onClick={fillRejectFromReport} disabled={reviewing || !!acting}>
-                            填入意见
-                          </Button>
-                          <Button size="sm" variant="danger" onClick={() => void rejectWithReport()} disabled={reviewing || !!acting}>
-                            {acting === "reject" ? "驳回中…" : "用报告驳回"}
-                          </Button>
-                        </>
+                        <Button size="sm" variant="danger" onClick={() => void rejectWithReport()} disabled={reviewing || !!acting}>
+                          {acting === "reject" ? "驳回中…" : "用报告驳回"}
+                        </Button>
                       )}
+                      {reviewReport && (
+                        <Button size="sm" variant="outline" className="hidden sm:inline-flex" onClick={() => setReportExpanded(true)}>
+                          展开报告
+                        </Button>
+                      )}
+                      {skills.length === 0 && !reviewing && (
+                        <Button size="sm" variant="outline" className="hidden sm:inline-flex" onClick={ensureReviewSkills}>
+                          导入审查技能
+                        </Button>
+                      )}
+                      {reviewReport && detail.chapter.status === "pending_review" && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="hidden sm:inline-flex"
+                          onClick={fillRejectFromReport}
+                          disabled={reviewing || !!acting}
+                        >
+                          填入意见
+                        </Button>
+                      )}
+                      {/* 手机:次要操作收入下拉 */}
+                      <details className="relative sm:hidden">
+                        <summary className="list-none cursor-pointer rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600">
+                          更多
+                        </summary>
+                        <div className="absolute right-0 z-10 mt-1 w-36 rounded-lg border border-slate-200 bg-white py-1 shadow-lg">
+                          {reviewReport && (
+                            <button
+                              type="button"
+                              className="block w-full px-3 py-2 text-left text-xs hover:bg-slate-50"
+                              onClick={() => setReportExpanded(true)}
+                            >
+                              展开报告
+                            </button>
+                          )}
+                          {skills.length === 0 && !reviewing && (
+                            <button
+                              type="button"
+                              className="block w-full px-3 py-2 text-left text-xs hover:bg-slate-50"
+                              onClick={ensureReviewSkills}
+                            >
+                              导入审查技能
+                            </button>
+                          )}
+                          {reviewReport && detail.chapter.status === "pending_review" && (
+                            <button
+                              type="button"
+                              className="block w-full px-3 py-2 text-left text-xs hover:bg-slate-50"
+                              onClick={fillRejectFromReport}
+                              disabled={reviewing || !!acting}
+                            >
+                              填入意见
+                            </button>
+                          )}
+                        </div>
+                      </details>
                     </div>
                   </div>
 

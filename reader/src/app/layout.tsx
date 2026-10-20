@@ -5,7 +5,7 @@ import { BottomNav } from "@/components/BottomNav";
 
 export const metadata: Metadata = {
   title: "织火阅读器",
-  description: "织火小说阅读 · 发现 · 我的书城",
+  description: "织火小说阅读 · 书城 · 书架",
   appleWebApp: {
     capable: true,
     title: "织火阅读",

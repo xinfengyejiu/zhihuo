@@ -8,6 +8,7 @@ import { useAuth } from "@/lib/auth";
 import { filterSkillsForChat } from "@/lib/product";
 import { useTasks } from "@/lib/tasks";
 import type { SkillInfo } from "@/lib/types";
+import { ChatSessionDrawer } from "@/components/ChatSessionDrawer";
 import { Spinner } from "@/components/ui";
 
 interface ChatSessionItem {
@@ -46,6 +47,7 @@ export default function ChatHomePage() {
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [skillId, setSkillId] = useState<number | null>(null);
   const chatSkills = filterSkillsForChat(skills, "novel");
+  const [sessionDrawerOpen, setSessionDrawerOpen] = useState(false);
   const [applying, setApplying] = useState(false);
   const [applyResult, setApplyResult] = useState<{
     novel_id: number;
@@ -231,10 +233,13 @@ export default function ChatHomePage() {
   return (
     <div className="flex h-full">
       {inConversation && (
-        <aside className="w-60 shrink-0 overflow-y-auto border-r border-slate-200 bg-white">
+        <ChatSessionDrawer open={sessionDrawerOpen} onClose={() => setSessionDrawerOpen(false)} className="md:w-60">
           <div className="p-3">
             <button
-              onClick={backToLanding}
+              onClick={() => {
+                setSessionDrawerOpen(false);
+                backToLanding();
+              }}
               className="w-full rounded-lg bg-indigo-600 py-2 text-sm font-medium text-white hover:bg-indigo-700"
             >
               + 新的对话
@@ -263,7 +268,10 @@ export default function ChatHomePage() {
                       className={`group flex cursor-pointer items-center justify-between rounded-lg px-3 py-2 text-sm ${
                         activeId === s.id ? "bg-indigo-50 text-indigo-700" : "text-slate-600 hover:bg-slate-50"
                       }`}
-                      onClick={() => openSession(s.id)}
+                      onClick={() => {
+                        setSessionDrawerOpen(false);
+                        openSession(s.id);
+                      }}
                     >
                       <span className="truncate">
                         {s.title}
@@ -301,24 +309,33 @@ export default function ChatHomePage() {
               );
             })}
           </ul>
-        </aside>
+        </ChatSessionDrawer>
       )}
 
       <div className="flex min-w-0 flex-1 flex-col">
         {inConversation ? (
           <>
-            <div className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-2">
-              <span className="truncate text-sm font-medium text-slate-600">
-                {sessions.find((s) => s.id === activeId)?.title || "对话"}
-              </span>
+            <div className="flex items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 py-2 sm:px-4">
+              <div className="flex min-w-0 items-center gap-2">
+                <button
+                  type="button"
+                  className="inline-flex h-8 shrink-0 items-center rounded-lg border border-slate-200 px-2 text-xs text-slate-600 md:hidden"
+                  onClick={() => setSessionDrawerOpen(true)}
+                >
+                  会话
+                </button>
+                <span className="truncate text-sm font-medium text-slate-600">
+                  {sessions.find((s) => s.id === activeId)?.title || "对话"}
+                </span>
+              </div>
               <button
                 type="button"
                 onClick={applyToShelf}
                 disabled={applying || streaming}
                 title="AI 从对话中提取选题、大纲、卷章目录、故事线、人物,自动创建到书架"
-                className="shrink-0 rounded-full border border-indigo-200 px-3 py-1 text-xs font-medium text-indigo-600 transition hover:bg-indigo-50 disabled:opacity-40"
+                className="shrink-0 rounded-full border border-indigo-200 px-2.5 py-1 text-xs font-medium text-indigo-600 transition hover:bg-indigo-50 disabled:opacity-40 sm:px-3"
               >
-                {applying ? "AI 整理中,约 10-30 秒…" : "📚 应用到书架"}
+                {applying ? "整理中…" : "应用到书架"}
               </button>
             </div>
             <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
@@ -379,7 +396,7 @@ export default function ChatHomePage() {
                 )}
               </div>
             </div>
-            <div className="border-t border-slate-200 bg-white px-4 py-3">
+            <div className="border-t border-slate-200 bg-white px-3 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-4">
               <div className="mx-auto max-w-3xl">
                 {applyResult && (
                   <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-xl bg-emerald-50 p-3 text-sm text-emerald-700">
@@ -579,6 +596,7 @@ export default function ChatHomePage() {
     </div>
   );
 }
+
 
 
 

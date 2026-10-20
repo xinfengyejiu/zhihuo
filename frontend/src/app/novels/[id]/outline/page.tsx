@@ -37,6 +37,16 @@ export default function OutlinePage() {
   const [manualBusy, setManualBusy] = useState(false);
   const [manualMsg, setManualMsg] = useState("");
   const [manualError, setManualError] = useState("");
+  // 批量导入章节正文(多 txt)
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchFiles, setBatchFiles] = useState<File[]>([]);
+  const [batchVolume, setBatchVolume] = useState("");
+  const [batchApproved, setBatchApproved] = useState(true);
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [batchMsg, setBatchMsg] = useState("");
+  const [batchError, setBatchError] = useState("");
+  const batchFileRef = useRef<HTMLInputElement>(null);
+  const batchFolderRef = useRef<HTMLInputElement>(null);
   // 总大纲文档(创作蓝图)
   const [outlineDocs, setOutlineDocs] = useState<{ id: number; title: string; word_count: number; updated_at: string }[]>([]);
   const [docsOpen, setDocsOpen] = useState(false);
@@ -85,6 +95,11 @@ export default function OutlinePage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    const el = batchFolderRef.current;
+    if (el) el.setAttribute("webkitdirectory", "");
+  }, [batchOpen]);
 
   useEffect(() => {
     if (!stickToBottom.current || !outputRef.current) return;
@@ -222,6 +237,50 @@ export default function OutlinePage() {
     }
   }
 
+  function pickBatchFiles(list: FileList | null) {
+    if (!list?.length) return;
+    const next = Array.from(list).filter((f) => /\.(txt|text|md|markdown)$/i.test(f.name));
+    setBatchFiles(next);
+    setBatchMsg("");
+    setBatchError("");
+  }
+
+  async function importBatchChapters() {
+    if (!batchFiles.length || batchBusy) return;
+    setBatchBusy(true);
+    setBatchError("");
+    setBatchMsg("");
+    try {
+      const form = new FormData();
+      for (const f of batchFiles) form.append("files", f);
+      if (batchVolume) form.append("volume_id", batchVolume);
+      form.append("status", batchApproved ? "approved" : "draft");
+      const res = await api.upload<{
+        chapters_created: number;
+        skipped_count: number;
+        message: string;
+        skipped?: { file: string; reason: string }[];
+      }>(`/novels/${id}/import-chapters`, form);
+      let tip = res.message || `已导入 ${res.chapters_created} 章`;
+      if (res.skipped?.length) {
+        const sample = res.skipped
+          .slice(0, 5)
+          .map((s) => `${s.file}: ${s.reason}`)
+          .join("；");
+        tip += `。跳过示例: ${sample}${res.skipped.length > 5 ? "…" : ""}`;
+      }
+      setBatchMsg(tip);
+      setBatchFiles([]);
+      if (batchFileRef.current) batchFileRef.current.value = "";
+      if (batchFolderRef.current) batchFolderRef.current.value = "";
+      await load();
+    } catch (e) {
+      setBatchError(e instanceof Error ? e.message : "导入失败");
+    } finally {
+      setBatchBusy(false);
+    }
+  }
+
   async function importDocFile(files: FileList | null) {
     if (!files || files.length === 0) return;
     setDocBusy(true);
@@ -288,6 +347,19 @@ export default function OutlinePage() {
           📖 总大纲({outlineDocs.length})
         </Button>
         <Button size="sm" variant="outline" onClick={() => { setManualOpen(true); setManualMsg(""); setManualError(""); }}>📋 批量建章</Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            setBatchOpen(true);
+            setBatchMsg("");
+            setBatchError("");
+            setBatchFiles([]);
+            setBatchVolume(volumes[0]?.id ? String(volumes[0].id) : "");
+          }}
+        >
+          ⬆ 批量导入正文
+        </Button>
         <Button size="sm" variant="outline" onClick={() => setAiOpen(true)}>✨ AI 生成章纲</Button>
         <Button size="sm" variant="ghost" onClick={loadSummary}>查看前情摘要</Button>
       </div>
@@ -565,6 +637,95 @@ export default function OutlinePage() {
               ) : null}
             </div>
           )}
+        </div>
+      </Modal>
+
+      <Modal
+        open={batchOpen}
+        title="批量导入章节正文"
+        onClose={() => !batchBusy && setBatchOpen(false)}
+        wide
+      >
+        <div className="space-y-3">
+          <p className="rounded-lg bg-indigo-50 p-2 text-xs text-indigo-700">
+            选择多个 .txt / .md(或整个文件夹)。每个文件名即章名(如「第一章 起源.txt」),文件内容写入该章正文;
+            按章序号自动排序后追加到本书现有章节之后。正文不足 100 字的文件会跳过。
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <input
+              ref={batchFileRef}
+              type="file"
+              multiple
+              accept=".txt,.text,.md,.markdown,text/plain,text/markdown"
+              className="hidden"
+              disabled={batchBusy}
+              onChange={(e) => pickBatchFiles(e.target.files)}
+            />
+            <input
+              ref={batchFolderRef}
+              type="file"
+              multiple
+              className="hidden"
+              disabled={batchBusy}
+              onChange={(e) => pickBatchFiles(e.target.files)}
+            />
+            <Button size="sm" variant="outline" disabled={batchBusy} onClick={() => batchFileRef.current?.click()}>
+              选择多个文件
+            </Button>
+            <Button size="sm" variant="outline" disabled={batchBusy} onClick={() => batchFolderRef.current?.click()}>
+              选择文件夹
+            </Button>
+          </div>
+          {batchFiles.length > 0 && (
+            <div className="max-h-40 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+              <p className="mb-1 font-medium text-slate-700">已选 {batchFiles.length} 个文件</p>
+              <ul className="space-y-0.5">
+                {batchFiles.slice(0, 30).map((f) => (
+                  <li key={f.name + f.size} className="truncate">
+                    {f.name}
+                  </li>
+                ))}
+                {batchFiles.length > 30 && <li>…还有 {batchFiles.length - 30} 个</li>}
+              </ul>
+            </div>
+          )}
+          <div className="flex flex-wrap items-end gap-3">
+            <div>
+              <Label>归入卷(可选)</Label>
+              <Select value={batchVolume} onChange={(e) => setBatchVolume(e.target.value)} disabled={batchBusy}>
+                <option value="">不指定卷</option>
+                {volumes.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.title}
+                  </option>
+                ))}
+              </Select>
+            </div>
+            <label className="flex items-center gap-2 pb-2 text-sm text-slate-600">
+              <input
+                type="checkbox"
+                checked={batchApproved}
+                disabled={batchBusy}
+                onChange={(e) => setBatchApproved(e.target.checked)}
+              />
+              导入后直接过审(阅读器可见)
+            </label>
+          </div>
+          {batchBusy && (
+            <p className="text-sm text-indigo-600">正在导入 {batchFiles.length} 个文件,请稍候…</p>
+          )}
+          {batchMsg && <div className="rounded-lg bg-emerald-50 p-2.5 text-sm text-emerald-700">✓ {batchMsg}</div>}
+          {batchError && (
+            <div className="rounded-lg border border-red-100 bg-red-50 p-2.5 text-sm text-red-600">{batchError}</div>
+          )}
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" disabled={batchBusy} onClick={() => setBatchOpen(false)}>
+              关闭
+            </Button>
+            <Button onClick={() => void importBatchChapters()} disabled={!batchFiles.length || batchBusy}>
+              {batchBusy ? "导入中…" : `开始导入${batchFiles.length ? ` (${batchFiles.length})` : ""}`}
+            </Button>
+          </div>
         </div>
       </Modal>
 

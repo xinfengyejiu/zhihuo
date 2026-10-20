@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from ..ai.novel_import import (
     IMPORT_EXTENSIONS,
     MIN_CHAPTER_CHARS,
+    ParsedChapter,
+    _chapter_order_key,
     ai_enrich_import,
     decode_txt_bytes,
     ensure_unique_titles,
@@ -63,6 +65,19 @@ tags_router = APIRouter(prefix="/tags", tags=["tags"])
 NOVEL_STATUSES = {"draft": "构思中", "serializing": "连载中", "completed": "已完本"}
 MAX_IMPORT_BYTES = 25 * 1024 * 1024
 MAX_IMPORT_CHAPTERS = 3000
+MAX_BATCH_CHAPTER_FILES = 500
+MAX_BATCH_CHAPTER_FILE_BYTES = 2 * 1024 * 1024
+
+
+def _title_from_chapter_filename(filename: str) -> str:
+    """从上传文件名取章名:去掉路径与扩展名。"""
+    name = (filename or "").replace("\\", "/").split("/")[-1].strip()
+    lower = name.lower()
+    for ext in IMPORT_EXTENSIONS:
+        if lower.endswith(ext):
+            name = name[: -len(ext)]
+            break
+    return name.strip()[:128] or "未命名章节"
 
 
 def get_owned_novel(novel_id: int, user: User, db: Session) -> Novel:
@@ -370,6 +385,132 @@ async def import_novel_txt(
             f"已导入前 {MAX_IMPORT_CHAPTERS} 章,后续可分段再导。"
             if truncated
             else f"已解析并录入 {created_volumes} 卷 / {created_chapters} 章"
+        ),
+    }
+
+
+@router.post("/{novel_id}/import-chapters")
+async def import_chapters_batch(
+    novel_id: int,
+    files: list[UploadFile] = File(...),
+    volume_id: int | None = Form(None),
+    status: str = Form("approved"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """已有书批量导入章节:每个 txt/md 文件名=章名,文件内容=正文,按章序追加。"""
+    novel = get_owned_novel(novel_id, user, db)
+    if not files:
+        raise HTTPException(400, "请选择至少一个 txt/md 文件")
+    if len(files) > MAX_BATCH_CHAPTER_FILES:
+        raise HTTPException(400, f"单次最多导入 {MAX_BATCH_CHAPTER_FILES} 个文件")
+
+    chapter_status = (status or "approved").strip().lower()
+    if chapter_status not in ("approved", "draft"):
+        raise HTTPException(400, "status 仅支持 approved 或 draft")
+
+    target_volume_id: int | None = None
+    if volume_id is not None:
+        vol = db.query(Volume).filter_by(id=volume_id, novel_id=novel_id).first()
+        if vol is None:
+            raise HTTPException(400, "目标卷不存在")
+        target_volume_id = vol.id
+
+    skipped: list[dict] = []
+    pending: list[tuple[str, str, int]] = []  # title, content, order_hint
+
+    for idx, upload in enumerate(files):
+        filename = upload.filename or f"chapter_{idx + 1}.txt"
+        lower = filename.lower().replace("\\", "/")
+        base_name = lower.split("/")[-1]
+        if not any(base_name.endswith(ext) for ext in IMPORT_EXTENSIONS):
+            skipped.append({"file": filename, "reason": "仅支持 .txt / .md"})
+            continue
+        raw = await upload.read()
+        if not raw:
+            skipped.append({"file": filename, "reason": "文件为空"})
+            continue
+        if len(raw) > MAX_BATCH_CHAPTER_FILE_BYTES:
+            skipped.append({"file": filename, "reason": f"单文件超过 {MAX_BATCH_CHAPTER_FILE_BYTES // (1024 * 1024)}MB"})
+            continue
+        try:
+            text = await asyncio.to_thread(decode_txt_bytes, raw)
+        except Exception as e:
+            skipped.append({"file": filename, "reason": f"解码失败: {e}"})
+            continue
+        content = (text or "").strip()
+        if len(content) < MIN_CHAPTER_CHARS:
+            skipped.append(
+                {
+                    "file": filename,
+                    "reason": f"正文不足 {MIN_CHAPTER_CHARS} 字",
+                }
+            )
+            continue
+        title = _title_from_chapter_filename(filename)
+        pending.append((title, content, idx))
+
+    if not pending:
+        raise HTTPException(
+            400,
+            "没有可导入的章节"
+            + (f"({len(skipped)} 个文件被跳过)" if skipped else ""),
+        )
+
+    pending.sort(
+        key=lambda item: _chapter_order_key(
+            ParsedChapter(title=item[0], content=item[1], pos=item[2])
+        )
+    )
+
+    max_sort = db.query(func.coalesce(func.max(Chapter.sort), -1)).filter_by(novel_id=novel_id).scalar()
+    start_sort = int(max_sort or -1) + 1
+
+    chapter_rows: list[tuple[Chapter, str]] = []
+    for i, (title, content, _) in enumerate(pending):
+        chapter = Chapter(
+            novel_id=novel.id,
+            volume_id=target_volume_id,
+            title=title[:128],
+            sort=start_sort + i,
+            status=chapter_status,
+            word_count=len(content),
+        )
+        db.add(chapter)
+        chapter_rows.append((chapter, content))
+    db.flush()
+
+    version_rows: list[tuple[Chapter, ChapterVersion]] = []
+    for chapter, content in chapter_rows:
+        version = ChapterVersion(
+            chapter_id=chapter.id,
+            kind="manual",
+            content=content,
+            word_count=len(content),
+            created_by_id=user.id,
+        )
+        db.add(version)
+        version_rows.append((chapter, version))
+    db.flush()
+
+    for chapter, version in version_rows:
+        chapter.current_version_id = version.id
+
+    recompute_words(db, novel)
+    db.commit()
+
+    created = len(chapter_rows)
+    return {
+        "ok": True,
+        "novel_id": novel.id,
+        "chapters_created": created,
+        "skipped": skipped,
+        "skipped_count": len(skipped),
+        "word_count": novel.current_words,
+        "status": chapter_status,
+        "message": (
+            f"已导入 {created} 章"
+            + (f",跳过 {len(skipped)} 个文件" if skipped else "")
         ),
     }
 

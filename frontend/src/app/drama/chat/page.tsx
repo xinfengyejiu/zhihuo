@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { ChatSessionDrawer } from "@/components/ChatSessionDrawer";
 import { api, streamSSE } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { filterSkillsForChat, useProduct } from "@/lib/product";
@@ -46,6 +47,7 @@ export default function DramaChatPage() {
   const [ready, setReady] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [saving, setSaving] = useState("");
+  const [sessionDrawerOpen, setSessionDrawerOpen] = useState(false);
   const [projectId, setProjectId] = useState<number | null>(null);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [skillId, setSkillId] = useState<number | null>(null);
@@ -210,11 +212,16 @@ export default function DramaChatPage() {
 
   return (
     <div className="flex h-full min-h-0 overflow-hidden">
-      <aside className="flex w-56 shrink-0 flex-col border-r border-slate-200 bg-white sm:w-60">
-        <div className="flex shrink-0 items-center justify-between border-b border-slate-100 px-3 py-2">
+      <ChatSessionDrawer open={sessionDrawerOpen} onClose={() => setSessionDrawerOpen(false)} className="md:w-60">
+        <div className="hidden shrink-0 items-center justify-between border-b border-slate-100 px-3 py-2 md:flex">
           <span className="text-xs font-medium text-slate-500">会话</span>
           <Button size="sm" variant="outline" onClick={newSession}>
             新建
+          </Button>
+        </div>
+        <div className="border-b border-slate-100 p-2 md:hidden">
+          <Button size="sm" className="w-full" variant="outline" onClick={newSession}>
+            新建会话
           </Button>
         </div>
         <div className="min-h-0 flex-1 space-y-1 overflow-y-auto p-2">
@@ -228,7 +235,14 @@ export default function DramaChatPage() {
                   activeId === s.id ? "bg-indigo-50 text-indigo-700" : "hover:bg-slate-50"
                 }`}
               >
-                <button type="button" className="min-w-0 flex-1 truncate text-left" onClick={() => openSession(s.id)}>
+                <button
+                  type="button"
+                  className="min-w-0 flex-1 truncate text-left"
+                  onClick={() => {
+                    setSessionDrawerOpen(false);
+                    openSession(s.id);
+                  }}
+                >
                   {s.title || "新对话"}
                 </button>
                 <button
@@ -242,11 +256,18 @@ export default function DramaChatPage() {
             ))
           )}
         </div>
-      </aside>
+      </ChatSessionDrawer>
 
       <section className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="shrink-0 border-b border-slate-200 bg-white px-3 py-2 sm:px-4">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <button
+              type="button"
+              className="inline-flex h-8 items-center rounded-lg border border-slate-200 px-2 text-xs text-slate-600 md:hidden"
+              onClick={() => setSessionDrawerOpen(true)}
+            >
+              会话
+            </button>
             <h1 className="text-sm font-semibold text-slate-800">漫剧聊天</h1>
             <p className="text-[11px] text-slate-400">
               粘贴剧本或聊分镜 · 谈完可存来源 / 应用剧本
@@ -333,7 +354,7 @@ export default function DramaChatPage() {
         </div>
 
         <form
-          className="shrink-0 border-t border-slate-200 bg-white p-3"
+          className="shrink-0 border-t border-slate-200 bg-white p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
           onSubmit={(e) => {
             e.preventDefault();
             send();

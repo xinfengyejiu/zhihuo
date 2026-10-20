@@ -12,3 +12,11 @@ body {
   max-width: 100%;
   overflow-x: hidden;
 }
+
+.scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}

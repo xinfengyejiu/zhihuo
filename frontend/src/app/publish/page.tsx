@@ -167,7 +167,7 @@ function TasksTab() {
               ))}
             </Select>
           </div>
-          <div className="min-w-56">
+          <div className="w-full min-w-0 sm:min-w-56">
             <Label>发布平台</Label>
             <div className="flex flex-wrap gap-1.5">
               {PLATFORMS.map((p) => (
