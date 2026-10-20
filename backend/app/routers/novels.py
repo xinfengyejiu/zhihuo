@@ -1,6 +1,7 @@
 """书架:标签 + 小说 CRUD + TXT 导入。"""
 
 import asyncio
+import re
 
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import func, or_
@@ -68,16 +69,44 @@ MAX_IMPORT_CHAPTERS = 3000
 MAX_BATCH_CHAPTER_FILES = 500
 MAX_BATCH_CHAPTER_FILE_BYTES = 2 * 1024 * 1024
 
+# 文件名序号前缀:0001_第一章 / 12.标题 / 003-序章
+_FILENAME_ORDER_PREFIX = re.compile(
+    r"^(?P<num>\d{1,6})(?:\s*[_\-.\s]\s*|\s+)(?P<title>.+)$"
+)
 
-def _title_from_chapter_filename(filename: str) -> str:
-    """从上传文件名取章名:去掉路径与扩展名。"""
+
+def _stem_from_chapter_filename(filename: str) -> str:
+    """去掉路径与扩展名后的纯文件名。"""
     name = (filename or "").replace("\\", "/").split("/")[-1].strip()
     lower = name.lower()
     for ext in IMPORT_EXTENSIONS:
         if lower.endswith(ext):
             name = name[: -len(ext)]
             break
-    return name.strip()[:128] or "未命名章节"
+    return name.strip()
+
+
+def _title_from_chapter_filename(filename: str) -> str:
+    """从上传文件名取章名:去掉路径、扩展名与可选数字序号前缀。"""
+    name = _stem_from_chapter_filename(filename)
+    m = _FILENAME_ORDER_PREFIX.match(name)
+    if m:
+        name = (m.group("title") or "").strip()
+    return name[:128] or "未命名章节"
+
+
+def _batch_chapter_sort_key(filename: str, title: str, content: str, idx: int) -> tuple:
+    """批量导入排序:优先文件名数字前缀(0001_),再中文章序,最后上传序号。"""
+    stem = _stem_from_chapter_filename(filename)
+    m = _FILENAME_ORDER_PREFIX.match(stem)
+    if m:
+        try:
+            return (0, int(m.group("num")), idx)
+        except ValueError:
+            pass
+    # 无数字前缀时用章名规则(第N章/话),再回退上传顺序
+    ch_key = _chapter_order_key(ParsedChapter(title=title or stem, content=content, pos=idx))
+    return (1, *ch_key)
 
 
 def get_owned_novel(novel_id: int, user: User, db: Session) -> Novel:
@@ -417,7 +446,8 @@ async def import_chapters_batch(
         target_volume_id = vol.id
 
     skipped: list[dict] = []
-    pending: list[tuple[str, str, int]] = []  # title, content, order_hint
+    # filename, title, content, upload_idx
+    pending: list[tuple[str, str, str, int]] = []
 
     for idx, upload in enumerate(files):
         filename = upload.filename or f"chapter_{idx + 1}.txt"
@@ -448,7 +478,7 @@ async def import_chapters_batch(
             )
             continue
         title = _title_from_chapter_filename(filename)
-        pending.append((title, content, idx))
+        pending.append((filename, title, content, idx))
 
     if not pending:
         raise HTTPException(
@@ -457,17 +487,14 @@ async def import_chapters_batch(
             + (f"({len(skipped)} 个文件被跳过)" if skipped else ""),
         )
 
-    pending.sort(
-        key=lambda item: _chapter_order_key(
-            ParsedChapter(title=item[0], content=item[1], pos=item[2])
-        )
-    )
+    # 优先按 0001_ 这种文件名序号排序(浏览器上传顺序不可靠)
+    pending.sort(key=lambda item: _batch_chapter_sort_key(item[0], item[1], item[2], item[3]))
 
     max_sort = db.query(func.coalesce(func.max(Chapter.sort), -1)).filter_by(novel_id=novel_id).scalar()
     start_sort = int(max_sort or -1) + 1
 
     chapter_rows: list[tuple[Chapter, str]] = []
-    for i, (title, content, _) in enumerate(pending):
+    for i, (_filename, title, content, _) in enumerate(pending):
         chapter = Chapter(
             novel_id=novel.id,
             volume_id=target_volume_id,
