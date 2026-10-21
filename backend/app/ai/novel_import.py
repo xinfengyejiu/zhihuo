@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from .extract import extract_json_object
+from .extract import extract_json_array, extract_json_object
 
 IMPORT_EXTENSIONS = (".txt", ".text", ".md", ".markdown")
 
@@ -23,25 +23,57 @@ MIN_CHAPTER_CHARS = 100
 _PARALLEL_CHAPTER_THRESHOLD = 24
 _MAX_PARSE_WORKERS = max(2, min(8, (os.cpu_count() or 4)))
 
-# 卷标题行(可带 Markdown #)
+# 卷标题行:仅短标题(避免「第一卷 卷名 章名」被误当成卷)
 VOLUME_LINE = re.compile(
     r"^\s*(?:#{1,6}\s*)?(?P<title>"
-    r"第[零〇一二三四五六七八九十百千万两\d]+卷[^\n]{0,40}"
-    r"|卷[零〇一二三四五六七八九十百千万两\d]+[^\n]{0,40}"
-    r"|VOLUME\s*\d+[^\n]{0,40}"
+    r"第[零〇一二三四五六七八九十百千万两\d]+卷(?:[ \t]+[^\n，。！？；：:]{1,16})?"
+    r"|卷[零〇一二三四五六七八九十百千万两\d]+(?:[ \t]+[^\n，。！？；]{1,16})?"
+    r"|VOLUME\s*\d+(?:[ \t]+[^\n]{1,20})?"
     r")\s*$",
     re.I | re.M,
 )
 
-# 规范章标题:「第一章 星空中的青铜巨棺」(副标题前须空白,且不含句读)
+# 规范章标题:「第一章 星空中的青铜巨棺」;亦兼容 Chapter1：xxx / Chapter1xxx
 CHAPTER_LINE = re.compile(
     r"^\s*(?:#{1,6}\s*)?(?P<title>"
-    r"第[零〇一二三四五六七八九十百千万两\d]+[章节回]"
+    r"第[零〇一二三四五六七八九十百千万两\d]+[章节回话]"
     r"(?:[ \t]+[^\n，。！？；、]{1,40})?"
-    r"|Chapter\s*\d+(?:[ \t]+[^\n，。！？；]{1,40})?"
-    r"|CHAPTER\s*\d+(?:[ \t]+[^\n，。！？；]{1,40})?"
+    r"|Chapter\s*\d+[^\n]{0,50}"
     r")\s*$",
     re.I | re.M,
+)
+
+# 「第一卷 第一章 标题」同行
+CHAPTER_VOL_CH = re.compile(
+    r"(?m)^\s*第[零〇一二三四五六七八九十百千万两\d]+卷\s+"
+    r"(?P<title>第[零〇一二三四五六七八九十百千万两\d]+[章节回话][^\n]{0,50})\s*$"
+)
+
+# 「第一卷 卷名 小节标题」红袖打包常见(整行当章)
+CHAPTER_VOL_PREFIX = re.compile(
+    r"(?m)^\s*第[零〇一二三四五六七八九十百千万两\d]+卷[ \t]+(?P<title>[^\n]{2,70})\s*$"
+)
+
+# 「荷殇(1)」「心意明（三）」「chapter2一巴掌（二）」
+CHAPTER_PAREN = re.compile(
+    r"(?m)^\s*(?P<title>(?!作品相关)[^\n「」\"“”]{1,30}"
+    r"[（(][一二三四五六七八九十百零〇\d]{1,5}[）)])\s*$"
+)
+
+# 红袖「作品相关 章名」(常与下一行重复章名并存,取此更稳)
+CHAPTER_ZUOPIN = re.compile(
+    r"(?m)^\s*作品相关[ \t]+(?P<title>[^\n]{1,60}?)\s*$"
+)
+
+# 「初识1」「妖女新娘2」「集市见闻3」短标题+序号
+CHAPTER_TITLE_NUM = re.compile(
+    r"(?m)^\s*(?P<title>(?!作品相关)[\u4e00-\u9fffA-Za-z]{1,12}\d{1,3})\s*$"
+)
+
+# 「卷一：妖从天降第一章洛纤纤（上）」
+CHAPTER_JUAN_CH = re.compile(
+    r"(?m)^\s*(?P<title>卷[零〇一二三四五六七八九十百千万两\d]+[：:\s].{0,50}"
+    r"第[零〇一二三四五六七八九十百千万两\d]+[章节回话][^\n]{0,40})\s*$"
 )
 
 # 作者说切分点(窄匹配,避免正文里误切)
@@ -57,8 +89,21 @@ CHAPTER_COMPACT = re.compile(
     re.M,
 )
 
+# 网文打包常见:独立成行的「正文 章名 / 正文 第X章 …」(非段落内出现)
+CHAPTER_ZHENGWEN = re.compile(
+    r"(?m)^\s*(?:#{1,6}\s*)?正文[ \t\u3000\ue5e5]+(?P<title>[^\n]{1,80}?)\s*$"
+)
+
+# 【第一章 xxx】整行
+CHAPTER_BRACKET = re.compile(
+    r"(?m)^\s*【\s*(?P<title>第[零〇一二三四五六七八九十百千万两\d]+[章节回话][^\n】]{0,40})\s*】\s*$"
+)
+
 # 纯 Markdown ATX 标题
 MD_HEADING = re.compile(r"^(?P<level>#{1,6})\s+(?P<title>.+?)\s*$", re.M)
+
+# 部分精校源用 PUA 当段首缩进(常见 \ue5e5),导入时规整为空格
+_PUA_INDENT = re.compile(r"[\ue000-\uf8ff]+")
 
 # 织火导出格式:====\n标题\n====
 EXPORT_SEP = re.compile(r"^\s*={3,}\s*$", re.M)
@@ -88,22 +133,117 @@ class ParsedNovel:
     source: str  # regex | export | ai-assist | whole
 
 
+def _cjk_score(text: str) -> int:
+    """粗略估计中文小说正文质量(CJK 越多越好)。"""
+    if not text:
+        return -10**9
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    bad = text.count("\ufffd")
+    # 惩罚替换符,奖励汉字
+    return cjk * 3 - bad * 40 - (0 if cjk else 1000)
+
+
 def decode_txt_bytes(data: bytes) -> str:
-    for enc in ("utf-8-sig", "utf-8", "gb18030", "gbk", "big5"):
-        try:
-            text = data.decode(enc)
-            if text.count("\ufffd") > max(20, len(text) // 50):
+    """尽力识别网文 txt 编码(UTF-8 / GBK / GB18030 / UTF-16 等)。
+
+    旧版严格解码导致大量红袖/起点导出 GBK 残缺字节直接失败;
+    现改为打分择优,最后仍可用 replace 兜底,避免批量导入大面积失败。
+    """
+    if not data:
+        raise HTTPException(400, "文件为空")
+
+    # BOM 优先
+    if data.startswith(b"\xff\xfe") or data.startswith(b"\xfe\xff"):
+        enc = "utf-16" if data.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-16"
+        text = data.decode(enc, errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+        if text.strip():
+            return text
+    if data.startswith(b"\xef\xbb\xbf"):
+        text = data.decode("utf-8-sig", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+        if text.strip():
+            return text
+
+    encodings = (
+        "utf-8-sig",
+        "utf-8",
+        "gb18030",
+        "gbk",
+        "cp936",
+        "big5",
+        "utf-16",
+        "utf-16-le",
+        "utf-16-be",
+    )
+    best_text = ""
+    best_score = -10**9
+
+    for enc in encodings:
+        # 先严格,再容错
+        for errors in ("strict", "replace"):
+            try:
+                text = data.decode(enc, errors=errors)
+            except (UnicodeDecodeError, LookupError):
                 continue
-            return text.replace("\r\n", "\n").replace("\r", "\n")
-        except UnicodeDecodeError:
-            continue
-    raise HTTPException(400, "无法识别文本编码,请另存为 UTF-8 或 GBK 后再导入")
+            text = text.replace("\r\n", "\n").replace("\r", "\n")
+            if not text.strip():
+                continue
+            bad = text.count("\ufffd")
+            # replace 模式下替换符过多则跳过
+            if errors == "replace" and bad > max(50, len(text) // 30):
+                continue
+            score = _cjk_score(text)
+            # 严格解码加分
+            if errors == "strict":
+                score += 500
+            if score > best_score:
+                best_score = score
+                best_text = text
+
+    if best_text.strip():
+        return best_text
+
+    # 最终兜底:按 GB18030 容错,几乎总能出字
+    text = data.decode("gb18030", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+    if text.strip():
+        return text
+    text = data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+    if text.strip():
+        return text
+    raise HTTPException(400, "文件无有效文本内容")
 
 
 def _clean_title(raw: str) -> str:
     t = re.sub(r"\s+", " ", (raw or "").strip())
     t = t.strip("#*=-—_|　")
     return t[:128] or "未命名章节"
+
+
+def title_from_batch_novel_filename(filename: str) -> str:
+    """批量多书导入:文件名即书名。
+
+    例: ``001.[红袖vip完结]日租:黑街教父送上门--第II部:《特工总裁摸错房》.txt``
+    → ``日租:黑街教父送上门--第II部:《特工总裁摸错房》``
+    去掉开头编号与方括号/书名号式标签。
+    """
+    name = (filename or "").replace("\\", "/").split("/")[-1].strip()
+    lower = name.lower()
+    for ext in IMPORT_EXTENSIONS:
+        if lower.endswith(ext):
+            name = name[: -len(ext)]
+            break
+    name = name.strip()
+    # 开头序号: 001. / 12_ / 3- / 0001 /
+    name = re.sub(r"^\d{1,6}\s*[._\-、．]?\s*", "", name)
+    # 连续剥离 [标签] / 【标签】
+    while True:
+        m = re.match(r"^\[([^\]]*)\]\s*", name)
+        if not m:
+            m = re.match(r"^【[^】]*】\s*", name)
+        if not m:
+            break
+        name = name[m.end() :]
+    name = re.sub(r"\s+", " ", name).strip(" ._-\u3000")
+    return (name or "未命名小说")[:128]
 
 
 def _guess_title_from_text(text: str, filename: str | None) -> str:
@@ -122,6 +262,10 @@ def _guess_title_from_text(text: str, filename: str | None) -> str:
             if not re.fullmatch(r"[\d\s\.]+", s):
                 return s[:128]
     if filename:
+        # 批量多书风格文件名优先(去编号/方括号标签)
+        batch = title_from_batch_novel_filename(filename)
+        if batch and batch != "未命名小说":
+            return batch
         name = re.sub(r"\.(txt|text|md|markdown)$", "", filename, flags=re.I)
         name = re.sub(r"[_\-]+", " ", name).strip()
         if name:
@@ -395,7 +539,7 @@ def _finalize_volumes(volumes: list[ParsedVolume], *, already_cleaned: bool = Fa
         fp_to_key: dict[str, str] = {}
 
         for ch in v.chapters:
-            title = _normalize_chapter_title(ch.title)
+            title = _normalize_chapter_title(ch.title) or _clean_title(ch.title)
             if not title:
                 continue
             if already_cleaned:
@@ -489,7 +633,8 @@ class _ChapterJob:
 
 def _refine_chapter_job(job: _ChapterJob) -> tuple[int, str, int, str, int, str, str | None] | None:
     """并行阶段:清洗正文 + 章纲;过短则丢弃。"""
-    title = _normalize_chapter_title(job.title)
+    # 「第X章」走规范化;「正文 番外名」等自由标题直接保留
+    title = _normalize_chapter_title(job.title) or _clean_title(job.title)
     if not title:
         return None
     content = _strip_leading_title(title, _strip_md_noise(job.body))
@@ -609,18 +754,70 @@ def _parse_export_format(text: str) -> list[ParsedChapter] | None:
     return chapters if len(chapters) >= 1 else None
 
 
+def _normalize_novel_text(text: str) -> str:
+    """导入前规整:PUA 缩进 → 空格,统一换行。"""
+    t = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    t = _PUA_INDENT.sub("  ", t)
+    return t
+
+
+def _freeform_chapter_title(raw: str, *, max_len: int = 60) -> str | None:
+    """自由章名(正文/卷前缀/括号节):清洗并过滤明显非标题。"""
+    title = _clean_title(raw or "")
+    if not title:
+        return None
+    if title.startswith("作品相关"):
+        title = _clean_title(title[len("作品相关") :])
+    if not title or len(title) > max_len:
+        return None
+    if title.endswith(("。", "！", "？", "…", "；")):
+        return None
+    # 过白的广告/元信息
+    if title.startswith(("资源", "本站", "附：", "附:", "作者", "文案", "ps：", "PS：")):
+        return None
+    return title[:128]
+
+
 def _parse_by_markers(text: str) -> list[ParsedVolume]:
     """按卷/章标题行切分全文。"""
     raw: list[tuple[int, str, str]] = []
     for m in VOLUME_LINE.finditer(text):
         raw.append((m.start(), "volume", _clean_title(m.group("title"))))
     seen_pos: set[int] = set()
-    for rx in (CHAPTER_LINE, CHAPTER_COMPACT, CHAPTER_AUTHOR_NOTE):
+    for rx in (CHAPTER_LINE, CHAPTER_COMPACT, CHAPTER_AUTHOR_NOTE, CHAPTER_BRACKET, CHAPTER_VOL_CH):
         for m in rx.finditer(text):
             if m.start() in seen_pos:
                 continue
-            title = _normalize_chapter_title(m.group("title"))
+            title = _normalize_chapter_title(m.group("title")) or _clean_title(m.group("title"))
             if not title:
+                continue
+            seen_pos.add(m.start())
+            raw.append((m.start(), "chapter", title))
+    # 「正文 章名」/「第一卷 … 小节」/「标题（一）」/「作品相关」等自由标题
+    for rx in (
+        CHAPTER_ZHENGWEN,
+        CHAPTER_VOL_PREFIX,
+        CHAPTER_PAREN,
+        CHAPTER_ZUOPIN,
+        CHAPTER_TITLE_NUM,
+        CHAPTER_JUAN_CH,
+    ):
+        for m in rx.finditer(text):
+            if m.start() in seen_pos:
+                continue
+            # 若同行已被识别为短卷名,跳过(避免卷行再当章)
+            nl = text.find("\n", m.start())
+            line = text[m.start() : nl if nl >= 0 else len(text)]
+            if rx is CHAPTER_VOL_PREFIX and VOLUME_LINE.match(line):
+                continue
+            title = _freeform_chapter_title(m.group("title"), max_len=70)
+            if not title:
+                continue
+            # 卷前缀行若其实是「第X章」已在上面处理过
+            if rx is CHAPTER_VOL_PREFIX and CHAPTER_VOL_CH.match(line):
+                continue
+            # 标题+数字过短且像年份/纯数字跳过
+            if rx is CHAPTER_TITLE_NUM and re.fullmatch(r"\d{1,4}", title):
                 continue
             seen_pos.add(m.start())
             raw.append((m.start(), "chapter", title))
@@ -728,7 +925,7 @@ def _outline_from_content(content: str, limit: int = 60) -> str | None:
 
 
 def parse_novel_txt(text: str, filename: str | None = None) -> ParsedNovel:
-    text = (text or "").strip()
+    text = _normalize_novel_text(text or "").strip()
     if len(text) < 20:
         raise HTTPException(400, "文本太短,无法导入")
 
@@ -785,6 +982,203 @@ def parse_novel_txt(text: str, filename: str | None = None) -> ParsedNovel:
             )
         ],
         source="whole",
+    )
+
+
+def _ai_split_sample(text: str, *, max_windows: int = 20) -> str:
+    """给模型的抽样正文:文首 + 均匀窗口,带 pos 便于对齐。"""
+    t = text or ""
+    parts = [f"【pos=0】\n{t[:2800]}"]
+    if len(t) <= 3200:
+        return parts[0]
+    usable = len(t) - 2800
+    n = max(4, min(max_windows, usable // 500))
+    step = max(400, usable // n)
+    for k in range(n):
+        pos = 2800 + k * step
+        if pos >= len(t):
+            break
+        parts.append(f"【pos={pos}】\n{t[pos : pos + 420]}")
+    blob = "\n\n".join(parts)
+    return blob[:11500]
+
+
+def _chapters_from_ai_items(text: str, items: list[dict]) -> list[ParsedChapter]:
+    """根据 AI 返回的 title+anchor 在原文定位并切章。"""
+    hits: list[tuple[int, str]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = _clean_title(str(item.get("title") or item.get("name") or ""))
+        anchor = str(item.get("anchor") or item.get("start") or item.get("quote") or "").strip()
+        if len(_norm_body(anchor)) < 10:
+            continue
+        # 在去空白键上找,再映射回原文位置
+        key = _norm_body(text)
+        akey = _norm_body(anchor)
+        if not akey or akey not in key:
+            # 缩短 anchor 再试
+            found = False
+            for L in (28, 20, 14):
+                if len(akey) >= L and akey[:L] in key:
+                    akey = akey[:L]
+                    found = True
+                    break
+            if not found:
+                continue
+        idx = key.find(akey)
+        if idx < 0:
+            continue
+        # 空白映射:key 下标 → 原文下标
+        pos = 0
+        seen = 0
+        while pos < len(text) and seen < idx:
+            if not text[pos].isspace():
+                seen += 1
+            pos += 1
+        hits.append((pos, (title or f"第{len(hits) + 1}章")[:128]))
+
+    if not hits:
+        return []
+    # 按位置去重(50 字内合并)
+    hits.sort(key=lambda x: x[0])
+    merged: list[tuple[int, str]] = []
+    for pos, title in hits:
+        if merged and abs(pos - merged[-1][0]) < 50:
+            # 保留更像样的标题
+            if _title_quality(title) > _title_quality(merged[-1][1]):
+                merged[-1] = (merged[-1][0], title)
+            continue
+        merged.append((pos, title))
+    if len(merged) < 2:
+        return []
+
+    # 若首章不在文首,把文首并入第一章
+    if merged[0][0] > 80:
+        merged.insert(0, (0, "开篇"))
+
+    out: list[ParsedChapter] = []
+    for i, (pos, title) in enumerate(merged):
+        end = merged[i + 1][0] if i + 1 < len(merged) else len(text)
+        body = text[pos:end].strip()
+        # 去掉开头可能重复的标题行
+        body = _strip_leading_title(title, body)
+        if _chapter_len(body) < MIN_CHAPTER_CHARS:
+            continue
+        out.append(
+            ParsedChapter(
+                title=title[:128],
+                content=body,
+                outline=_outline_from_content(body),
+                pos=pos,
+            )
+        )
+    return out
+
+
+def ai_split_chapters(
+    db: Session,
+    user_id: int,
+    text: str,
+    *,
+    novel_id: int | None = None,
+    title_hint: str = "",
+) -> list[ParsedChapter] | None:
+    """规则无法分章时,用大模型根据抽样推断目录并用 anchor 回切原文。"""
+    raw = _normalize_novel_text(text or "").strip()
+    if _chapter_len(raw) < MIN_CHAPTER_CHARS * 4:
+        return None
+
+    sample = _ai_split_sample(raw)
+    system = (
+        "你是中文网文分章编辑。文本没有规范「第X章」标记,请根据剧情/场景切换推断章节。"
+        "只输出 JSON 对象:"
+        '{"chapters":[{"title":"章名","anchor":"该章开头在下文片段中出现的原文连续句子(至少14字,必须一字不差复制)}]}。'
+        "要求:章数尽量完整(常见 10～200);anchor 必须从提供的【pos=】片段里原样复制;"
+        "不要广告行;不要解释。"
+    )
+    user_msg = (
+        f"书名提示:{title_hint or '(无)'}\n全文约 {len(raw)} 字。\n"
+        f"## 抽样正文\n{sample}"
+    )
+    try:
+        data = extract_json_object(db, user_id, system, user_msg, novel_id=novel_id)
+    except Exception:
+        data = {}
+    items = data.get("chapters") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        items = []
+    chapters = _chapters_from_ai_items(raw, items)
+    if len(chapters) >= 2:
+        return chapters
+
+    # 抽样不够时分段请求(控制调用次数)
+    window = 14000
+    overlap = 600
+    max_calls = 8
+    acc: list[dict] = []
+    pos = 0
+    calls = 0
+    while pos < len(raw) and calls < max_calls:
+        chunk = raw[pos : pos + window]
+        try:
+            part = extract_json_array(
+                db,
+                user_id,
+                (
+                    "从这段小说正文中找出章节起始。输出 JSON 数组:"
+                    '[{"title":"章名","anchor":"章开头原文连续≥14字(必须从本段复制)"}]。'
+                    "若本段没有新章开始则输出 []。只输出 JSON 数组。"
+                ),
+                f"## 正文片段(全局起点约 {pos})\n{chunk[:11000]}",
+                novel_id=novel_id,
+            )
+            acc.extend(part)
+        except Exception:
+            pass
+        calls += 1
+        nxt = pos + window - overlap
+        if nxt <= pos:
+            break
+        pos = nxt
+        if pos + MIN_CHAPTER_CHARS * 2 >= len(raw):
+            break
+
+    chapters = _chapters_from_ai_items(raw, acc)
+    return chapters if len(chapters) >= 2 else None
+
+
+def maybe_ai_split_parsed(
+    db: Session,
+    user_id: int,
+    parsed: ParsedNovel,
+    full_text: str,
+    *,
+    novel_id: int | None = None,
+) -> ParsedNovel:
+    """若当前仍是整本一章,调用大模型分章并替换。"""
+    ch_count = sum(len(v.chapters) for v in parsed.volumes)
+    if ch_count > 1:
+        return parsed
+    if _chapter_len(full_text) < MIN_CHAPTER_CHARS * 4:
+        return parsed
+    try:
+        chapters = ai_split_chapters(
+            db,
+            user_id,
+            full_text,
+            novel_id=novel_id,
+            title_hint=parsed.title,
+        )
+    except Exception:
+        return parsed
+    if not chapters or len(chapters) < 2:
+        return parsed
+    return ParsedNovel(
+        title=parsed.title,
+        summary=parsed.summary,
+        volumes=[ParsedVolume(title="第一卷", chapters=chapters, pos=0)],
+        source="ai-split",
     )
 
 

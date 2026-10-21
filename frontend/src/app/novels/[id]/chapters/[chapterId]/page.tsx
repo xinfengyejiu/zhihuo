@@ -78,6 +78,7 @@ export default function ChapterEditorPage() {
   };
   const [selfCheck, setSelfCheck] = useState<SelfCheckResult | null>(null);
   const [selfChecking, setSelfChecking] = useState(false);
+  const [reparagraphing, setReparagraphing] = useState(false);
   /** 勾选要 AI 改的项;默认全选 */
   const [fixSelected, setFixSelected] = useState<boolean[]>([]);
   /** 可编辑的修改建议(与 issues 一一对应) */
@@ -214,6 +215,39 @@ export default function ChapterEditorPage() {
     } catch (e) {
       setError(e instanceof Error ? e.message : "保存失败");
       return false;
+    }
+  }
+
+  async function reparagraphChapter() {
+    if (reparagraphing) return;
+    if (dirty && !confirm("当前有未保存修改,AI 分段会先用已保存正文。继续?")) return;
+    setReparagraphing(true);
+    setError("");
+    setNotice("AI 分段中(单章一次调用模型,通常十几秒)…");
+    try {
+      const res = await api.post<{
+        changed: boolean;
+        message: string;
+        chapter?: Chapter;
+      }>(`/novels/${id}/chapters/${chapterId}/reparagraph`);
+      if (res.changed) {
+        const content = await api.get<{ content: string }>(`/novels/${id}/chapters/${chapterId}/content`);
+        setInitialContent(content.content);
+        editor?.commands.setContent(textToEditorHtml(content.content));
+        setDirty(false);
+        if (res.chapter) setChapter(res.chapter);
+        else await load();
+        setNotice(res.message || "AI 已分段");
+        void runSelfCheck(content.content);
+      } else {
+        setNotice(res.message || "无需分段");
+      }
+      setTimeout(() => setNotice(""), 3500);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "AI 分段失败(请确认已配置润色/章节模型)");
+      setNotice("");
+    } finally {
+      setReparagraphing(false);
     }
   }
 
@@ -443,6 +477,9 @@ export default function ChapterEditorPage() {
             <Button size="sm" variant="ghost" className="hidden sm:inline-flex" onClick={openReports}>复盘</Button>
             <Button size="sm" variant="ghost" onClick={() => runSelfCheck()} disabled={selfChecking}>
               {selfChecking ? "自检中…" : "自检"}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => void reparagraphChapter()} disabled={reparagraphing}>
+              {reparagraphing ? "AI分段中…" : "AI分段"}
             </Button>
             <Button
               size="sm"

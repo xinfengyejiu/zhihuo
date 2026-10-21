@@ -47,6 +47,10 @@ export default function OutlinePage() {
   const [batchError, setBatchError] = useState("");
   const batchFileRef = useRef<HTMLInputElement>(null);
   const batchFolderRef = useRef<HTMLInputElement>(null);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [reparaBusy, setReparaBusy] = useState(false);
+  const [reparaChapterId, setReparaChapterId] = useState<number | null>(null);
+  const [reparaTip, setReparaTip] = useState("");
   // 总大纲文档(创作蓝图)
   const [outlineDocs, setOutlineDocs] = useState<{ id: number; title: string; word_count: number; updated_at: string }[]>([]);
   const [docsOpen, setDocsOpen] = useState(false);
@@ -151,6 +155,70 @@ export default function OutlinePage() {
     load();
   }
 
+  async function reparagraphOne(chapterId: number) {
+    if (reparaBusy) return;
+    setReparaBusy(true);
+    setReparaChapterId(chapterId);
+    setError("");
+    try {
+      const res = await api.post<{ message: string; changed: boolean }>(
+        `/novels/${id}/chapters/${chapterId}/reparagraph`
+      );
+      setNoticeTip(res.message || (res.changed ? "已分段" : "无需调整"));
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "AI 分段失败");
+    } finally {
+      setReparaBusy(false);
+      setReparaChapterId(null);
+    }
+  }
+
+  async function reparagraphAll() {
+    if (reparaBusy) return;
+    if (
+      !confirm(
+        `将对本书全部 ${chapters.length} 章用 AI 按网文格式分段(对话独立、短段落,尽量不改字)。\n章数多时会较慢并消耗模型额度,确定继续?`
+      )
+    ) {
+      return;
+    }
+    setReparaBusy(true);
+    setReparaChapterId(null);
+    setError("");
+    setReparaTip("AI 全书分段进行中…");
+    try {
+      let lastMsg = "";
+      await streamSSE(`/novels/${id}/chapters/reparagraph-all`, {}, (ev) => {
+        if (ev.type === "status") {
+          setReparaTip(String(ev.detail || "进行中…"));
+        } else if (ev.type === "progress") {
+          const cur = Number(ev.current || 0);
+          const tot = Number(ev.total || chapters.length);
+          const title = String(ev.title || "");
+          const detail = String(ev.detail || "");
+          setReparaTip(`AI 分段 ${cur}/${tot}${title ? ` · ${title}` : ""}${detail ? ` · ${detail}` : ""}`);
+        } else if (ev.type === "done") {
+          lastMsg = String(ev.message || "完成");
+        } else if (ev.type === "error") {
+          throw new Error(String(ev.detail || "全书分段失败"));
+        }
+      });
+      setNoticeTip(lastMsg || "全书 AI 分段完成");
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "全书分段失败");
+      setReparaTip("");
+    } finally {
+      setReparaBusy(false);
+    }
+  }
+
+  function setNoticeTip(text: string) {
+    setReparaTip(text);
+    setTimeout(() => setReparaTip(""), 5000);
+  }
+
   function runAI() {
     if (aiBusy) return;
     const instruction = aiInstruction.trim();
@@ -243,6 +311,19 @@ export default function OutlinePage() {
     setBatchFiles(next);
     setBatchMsg("");
     setBatchError("");
+  }
+
+  async function exportChaptersZip() {
+    if (exportBusy || chapters.length === 0) return;
+    setExportBusy(true);
+    setError("");
+    try {
+      await api.download(`/novels/${id}/export-chapters`, `novel_${id}_chapters.zip`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "导出失败");
+    } finally {
+      setExportBusy(false);
+    }
   }
 
   async function importBatchChapters() {
@@ -360,9 +441,21 @@ export default function OutlinePage() {
         >
           ⬆ 批量导入正文
         </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => void exportChaptersZip()}
+          disabled={exportBusy || chapters.length === 0}
+        >
+          {exportBusy ? "导出中…" : "⬇ 导出正文"}
+        </Button>
         <Button size="sm" variant="outline" onClick={() => setAiOpen(true)}>✨ AI 生成章纲</Button>
+        <Button size="sm" variant="outline" onClick={() => void reparagraphAll()} disabled={reparaBusy || chapters.length === 0}>
+          {reparaBusy && reparaChapterId === null ? "AI 全书分段中…" : "✨ AI 一键分段"}
+        </Button>
         <Button size="sm" variant="ghost" onClick={loadSummary}>查看前情摘要</Button>
       </div>
+      {reparaTip && <p className="mb-2 text-sm text-emerald-600">✓ {reparaTip}</p>}
       <ErrorText>{error}</ErrorText>
 
       {summary !== null && (
@@ -426,6 +519,13 @@ export default function OutlinePage() {
                           </Link>
                           <div className="flex shrink-0 gap-2 text-xs">
                             <button
+                              className="text-amber-700 hover:underline disabled:opacity-40"
+                              disabled={reparaBusy}
+                              onClick={() => void reparagraphOne(c.id)}
+                            >
+                              {reparaChapterId === c.id ? "AI分段中…" : "AI分段"}
+                            </button>
+                            <button
                               className="text-violet-600 hover:underline"
                               onClick={() => setStoryboardChapter(c)}
                             >
@@ -480,6 +580,13 @@ export default function OutlinePage() {
                     <span className="shrink-0 text-xs text-slate-400">{c.word_count} 字</span>
                   </Link>
                   <div className="flex shrink-0 gap-2 text-xs">
+                    <button
+                      className="text-amber-700 hover:underline disabled:opacity-40"
+                      disabled={reparaBusy}
+                      onClick={() => void reparagraphOne(c.id)}
+                    >
+                      {reparaChapterId === c.id ? "AI分段中…" : "AI分段"}
+                    </button>
                     <button className="text-violet-600 hover:underline" onClick={() => setStoryboardChapter(c)}>
                       分镜
                     </button>

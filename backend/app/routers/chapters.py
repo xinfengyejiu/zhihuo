@@ -1,6 +1,7 @@
 """大纲(卷/章)与章节正文:AI 生成、版本、状态机。"""
 
 import json
+import re
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session
 from ..ai import context as ai_context
 from ..ai.gateway import log_usage, resolve_route, stream_chat
 from ..ai.outline_catalog import chapter_key, parse_catalog
+from ..ai.reparagraph import ai_reparagraph_novel, smart_reparagraph
 from ..database import SessionLocal, get_db
 from ..models import (
     Chapter,
@@ -314,6 +316,290 @@ def save_chapter_content(
     db.commit()
     db.refresh(chapter)
     return _to_chapter_out(db, chapter)
+
+
+async def _collect_model_text(
+    db: Session,
+    user_id: int,
+    novel_id: int,
+    purpose: str,
+    messages: list[dict],
+    *,
+    max_tokens_override: int = 8192,
+) -> str:
+    parts: list[str] = []
+    usage = None
+    model_name = ""
+    async for ev in stream_chat(
+        db,
+        user_id,
+        novel_id,
+        purpose,
+        messages,
+        temperature_override=0.2,
+        max_tokens_override=max_tokens_override,
+        product_key="novel",
+    ):
+        et = ev.get("type")
+        if et == "delta":
+            parts.append(str(ev.get("content") or ""))
+        elif et == "reasoning" and not parts:
+            # 部分思考模型把正文放在 reasoning;先攒着,若无 delta 再启用
+            pass
+        elif et == "usage":
+            usage = ev
+        elif et == "model":
+            model_name = str(ev.get("name") or ev.get("model") or "")
+    text = "".join(parts).strip()
+    if usage:
+        log_usage(
+            db,
+            user_id,
+            novel_id,
+            purpose,
+            {
+                "provider_name": usage.get("provider_name"),
+                "model_name": usage.get("model_name") or model_name,
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+                "_product_key": "novel",
+            },
+        )
+    return text
+
+
+def _save_reparagraph_version(db: Session, chapter: Chapter, user_id: int, new: str) -> None:
+    version = ChapterVersion(
+        chapter_id=chapter.id,
+        kind="manual",
+        content=new,
+        word_count=len(new),
+        created_by_id=user_id,
+    )
+    db.add(version)
+    db.flush()
+    chapter.current_version_id = version.id
+    chapter.word_count = len(new)
+    if chapter.status == "rejected":
+        chapter.status = "draft"
+
+
+async def _ai_reparagraph_chapter_content(
+    db: Session,
+    user_id: int,
+    novel_id: int,
+    old: str,
+) -> tuple[str, str]:
+    """调用润色用途模型做网文分段;失败回退规则短段。"""
+    purpose = "polish"
+    try:
+        resolve_route(db, user_id, purpose)
+    except HTTPException:
+        purpose = "chapter"
+        resolve_route(db, user_id, purpose)
+
+    # 分段输出≈原文+换行,按输入估 max_tokens,避免过大浪费
+    est = max(1024, min(8192, len(re.sub(r"\s+", "", old or "")) + 800))
+
+    async def complete(messages: list[dict]) -> str:
+        return await _collect_model_text(
+            db,
+            user_id,
+            novel_id,
+            purpose,
+            messages,
+            max_tokens_override=est,
+        )
+
+    return await ai_reparagraph_novel(old, complete=complete)
+
+
+@router.post("/chapters/{chapter_id}/reparagraph")
+async def reparagraph_chapter(
+    novel_id: int,
+    chapter_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """单章 AI 网文分段:对话独立、短段落;校验不改字。"""
+    chapter = _get_chapter(novel_id, chapter_id, user, db)
+    old = _current_content(chapter) or ""
+    if not old.strip():
+        return {"ok": True, "changed": False, "message": "正文为空", "chapter_id": chapter.id}
+
+    new, source = await _ai_reparagraph_chapter_content(db, user.id, novel_id, old)
+    if new == old:
+        return {
+            "ok": True,
+            "changed": False,
+            "message": "无需调整",
+            "chapter_id": chapter.id,
+            "source": source,
+        }
+
+    _save_reparagraph_version(db, chapter, user.id, new)
+    recompute_words(db, chapter.novel)
+    db.commit()
+    db.refresh(chapter)
+    paras_before = max(1, old.count("\n\n") + 1)
+    paras_after = max(1, new.count("\n\n") + 1)
+    return {
+        "ok": True,
+        "changed": True,
+        "source": source,
+        "chapter_id": chapter.id,
+        "title": chapter.title,
+        "paras_before": paras_before,
+        "paras_after": paras_after,
+        "chapter": _to_chapter_out(db, chapter).model_dump(),
+        "message": (
+            f"已整理版式({paras_before}→{paras_after} 段)"
+            if source == "skip"
+            else f"AI 已按网文格式分段({paras_before}→{paras_after} 段"
+            + ("" if source == "ai" else ",部分回退规则")
+            + ")"
+        ),
+    }
+
+
+@router.post("/chapters/reparagraph-all")
+async def reparagraph_all_chapters(
+    novel_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """全书 AI 网文分段(NDJSON 进度流)。每章调用模型,耗时随章数增加。"""
+    novel = get_owned_novel(novel_id, user, db)
+    chapter_ids = [
+        int(row[0])
+        for row in db.query(Chapter.id)
+        .filter_by(novel_id=novel_id)
+        .order_by(Chapter.sort, Chapter.id)
+        .all()
+    ]
+    try:
+        resolve_route(db, user.id, "polish")
+    except HTTPException:
+        resolve_route(db, user.id, "chapter")
+
+    user_id = user.id
+    novel_id_ = novel.id
+    total = len(chapter_ids)
+
+    async def event_stream():
+        changed = 0
+        skipped = 0
+        failed = 0
+        def pack(ev: dict) -> str:
+            return f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+        yield pack({"type": "status", "detail": f"开始 AI 网文分段,共 {total} 章"})
+        for i, cid in enumerate(chapter_ids, start=1):
+            s = SessionLocal()
+            try:
+                ch = s.query(Chapter).filter_by(id=cid, novel_id=novel_id_).first()
+                if ch is None:
+                    skipped += 1
+                    continue
+                old = ""
+                for v in ch.versions:
+                    if v.id == ch.current_version_id:
+                        old = v.content or ""
+                        break
+                title = ch.title
+                if not (old or "").strip():
+                    skipped += 1
+                    yield pack(
+                        {
+                            "type": "progress",
+                            "current": i,
+                            "total": total,
+                            "chapter_id": cid,
+                            "title": title,
+                            "changed": False,
+                            "detail": "空正文,跳过",
+                        }
+                    )
+                    continue
+                try:
+                    new, source = await _ai_reparagraph_chapter_content(s, user_id, novel_id_, old)
+                except Exception as e:
+                    failed += 1
+                    yield pack(
+                        {
+                            "type": "progress",
+                            "current": i,
+                            "total": total,
+                            "chapter_id": cid,
+                            "title": title,
+                            "changed": False,
+                            "detail": f"失败:{e}",
+                        }
+                    )
+                    continue
+                if new == old:
+                    skipped += 1
+                    yield pack(
+                        {
+                            "type": "progress",
+                            "current": i,
+                            "total": total,
+                            "chapter_id": cid,
+                            "title": title,
+                            "changed": False,
+                            "source": source,
+                            "detail": "无需调整",
+                        }
+                    )
+                    continue
+                _save_reparagraph_version(s, ch, user_id, new)
+                recompute_words(s, ch.novel)
+                s.commit()
+                changed += 1
+                yield pack(
+                    {
+                        "type": "progress",
+                        "current": i,
+                        "total": total,
+                        "chapter_id": cid,
+                        "title": title,
+                        "changed": True,
+                        "source": source,
+                        "detail": f"已分段({source})",
+                    }
+                )
+            except Exception as e:
+                s.rollback()
+                failed += 1
+                yield pack(
+                    {
+                        "type": "progress",
+                        "current": i,
+                        "total": total,
+                        "chapter_id": cid,
+                        "changed": False,
+                        "detail": f"异常:{e}",
+                    }
+                )
+            finally:
+                s.close()
+
+        yield pack(
+            {
+                "type": "done",
+                "total": total,
+                "changed": changed,
+                "skipped": skipped,
+                "failed": failed,
+                "message": f"完成:分段 {changed} 章,跳过 {skipped},失败 {failed}",
+            }
+        )
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
 
 
 @router.post("/chapters/{chapter_id}/adopt", response_model=ChapterOut)

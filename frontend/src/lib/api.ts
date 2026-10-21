@@ -109,6 +109,50 @@ export const api = {
     }
     return resp.json() as Promise<T>;
   },
+  /** 下载二进制(zip 等),触发浏览器保存 */
+  download: async (path: string, fallbackName: string): Promise<void> => {
+    const headers: Record<string, string> = {};
+    const token = getToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const resp = await fetch(`${getApiBase()}${path}`, { headers });
+    if (resp.status === 401 && typeof window !== "undefined") {
+      setToken(null);
+      window.location.href = "/login";
+      throw new ApiError(401, "未登录");
+    }
+    if (!resp.ok) {
+      let detail = `请求失败(HTTP ${resp.status})`;
+      try {
+        const data = await resp.json();
+        if (data.detail) detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail);
+      } catch {
+        /* ignore */
+      }
+      throw new ApiError(resp.status, detail);
+    }
+    const cd = resp.headers.get("Content-Disposition") || "";
+    let filename = fallbackName;
+    const mStar = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+    const mBasic = /filename="?([^";]+)"?/i.exec(cd);
+    if (mStar?.[1]) {
+      try {
+        filename = decodeURIComponent(mStar[1]);
+      } catch {
+        filename = mStar[1];
+      }
+    } else if (mBasic?.[1]) {
+      filename = mBasic[1];
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
 };
 
 /** POST + SSE 流式读取,逐事件回调。返回最终拼出的文本。 */

@@ -1,9 +1,13 @@
 """书架:标签 + 小说 CRUD + TXT 导入。"""
 
 import asyncio
+import io
 import re
+import zipfile
+from urllib.parse import quote
 
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
@@ -15,8 +19,10 @@ from ..ai.novel_import import (
     ai_enrich_import,
     decode_txt_bytes,
     ensure_unique_titles,
+    maybe_ai_split_parsed,
     parse_novel_txt,
     sanitize_parsed_novel,
+    title_from_batch_novel_filename,
 )
 from ..database import get_db
 from ..models import (
@@ -68,6 +74,7 @@ MAX_IMPORT_BYTES = 25 * 1024 * 1024
 MAX_IMPORT_CHAPTERS = 3000
 MAX_BATCH_CHAPTER_FILES = 500
 MAX_BATCH_CHAPTER_FILE_BYTES = 2 * 1024 * 1024
+MAX_BATCH_NOVEL_ZIP_BYTES = 200 * 1024 * 1024
 
 # 文件名序号前缀:0001_第一章 / 12.标题 / 003-序章
 _FILENAME_ORDER_PREFIX = re.compile(
@@ -270,37 +277,33 @@ def create_novel(body: NovelIn, user: User = Depends(get_current_user), db: Sess
     return novel
 
 
-@router.post("/import-txt")
-async def import_novel_txt(
-    file: UploadFile = File(...),
-    title: str | None = Form(None),
-    use_ai: str = Form("true"),
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """上传 TXT/Markdown 小说:规则拆卷章 + AI 补书名/简介,批量录入正文。"""
-    filename = file.filename or "novel.txt"
-    lower = filename.lower()
-    if not lower.endswith(IMPORT_EXTENSIONS):
-        raise HTTPException(400, "仅支持 .txt / .md 文本文件")
-    data = await file.read()
+async def _import_one_novel_from_bytes(
+    db: Session,
+    user: User,
+    *,
+    data: bytes,
+    filename: str,
+    title_override: str | None = None,
+    use_ai: bool = True,
+    prefer_filename_title: bool = False,
+) -> dict:
+    """将单本 TXT/MD 字节解析并入库。成功返回结果 dict;失败抛 HTTPException。"""
     if not data:
         raise HTTPException(400, "文件为空")
     if len(data) > MAX_IMPORT_BYTES:
         raise HTTPException(400, f"文件过大(上限 {MAX_IMPORT_BYTES // (1024 * 1024)}MB)")
 
     text = await asyncio.to_thread(decode_txt_bytes, data)
-    # 拆分+并行清洗+按序合并(O(n),放到线程池避免卡住事件循环)
     parsed = await asyncio.to_thread(parse_novel_txt, text, filename)
 
-    override = (title or "").strip()
+    override = (title_override or "").strip()
+    if prefer_filename_title and not override:
+        override = title_from_batch_novel_filename(filename)
     if override:
         parsed.title = override[:128]
 
-    # 大文件/多章节一律跳过 AI,避免卡住
-    ai_on = str(use_ai).strip().lower() in ("1", "true", "yes", "on")
     ch_preview = sum(len(v.chapters) for v in parsed.volumes)
-    if ai_on and ch_preview <= 40 and len(text) < 800_000:
+    if use_ai and ch_preview <= 40 and len(text) < 800_000:
         try:
             parsed = ai_enrich_import(db, user.id, parsed, text)
             if override:
@@ -308,7 +311,16 @@ async def import_novel_txt(
         except Exception:
             pass
 
-    # 同名避让
+    # 规则仍只有一章时,强制走大模型分章(与是否开启「AI 补书名」无关)
+    ch_preview = sum(len(v.chapters) for v in parsed.volumes)
+    if ch_preview <= 1 and len(text) >= MIN_CHAPTER_CHARS * 4:
+        try:
+            parsed = maybe_ai_split_parsed(db, user.id, parsed, text)
+            if override:
+                parsed.title = override[:128]
+        except Exception:
+            pass
+
     base_title = parsed.title
     n = 2
     while db.query(Novel).filter_by(owner_id=user.id, title=parsed.title).first():
@@ -343,7 +355,6 @@ async def import_novel_txt(
     db.add(novel)
     db.flush()
 
-    # 批量写库:卷 → flush → 章 → flush → 版本 → flush → 回填 current_version
     vol_rows: list[Volume] = []
     for vol_sort, v in enumerate(parsed.volumes, start=1):
         vol = Volume(novel_id=novel.id, title=v.title[:128], outline=v.outline, sort=vol_sort)
@@ -356,7 +367,6 @@ async def import_novel_txt(
     for vol, v in zip(vol_rows, parsed.volumes):
         for ch in v.chapters:
             content = (ch.content or "").strip()
-            # 硬闸:绝不写入短章
             if len(content) < MIN_CHAPTER_CHARS:
                 continue
             ch_sort += 1
@@ -414,6 +424,181 @@ async def import_novel_txt(
             f"已导入前 {MAX_IMPORT_CHAPTERS} 章,后续可分段再导。"
             if truncated
             else f"已解析并录入 {created_volumes} 卷 / {created_chapters} 章"
+        ),
+    }
+
+
+@router.post("/import-txt")
+async def import_novel_txt(
+    file: UploadFile = File(...),
+    title: str | None = Form(None),
+    use_ai: str = Form("true"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """上传 TXT/Markdown 小说:规则拆卷章 + AI 补书名/简介,批量录入正文。"""
+    filename = file.filename or "novel.txt"
+    lower = filename.lower()
+    if not lower.endswith(IMPORT_EXTENSIONS):
+        raise HTTPException(400, "仅支持 .txt / .md 文本文件")
+    data = await file.read()
+    ai_on = str(use_ai).strip().lower() in ("1", "true", "yes", "on")
+    return await _import_one_novel_from_bytes(
+        db,
+        user,
+        data=data,
+        filename=filename,
+        title_override=title,
+        use_ai=ai_on,
+        prefer_filename_title=False,
+    )
+
+
+def _iter_zip_novel_files(data: bytes) -> list[tuple[str, bytes]]:
+    """从 zip 取出 txt/md;(显示名, 内容)。跳过目录与 macOS 垃圾项。"""
+    out: list[tuple[str, bytes]] = []
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as e:
+        raise HTTPException(400, f"无法解析压缩包: {e}") from e
+    with zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            path = info.filename.replace("\\", "/")
+            base = path.split("/")[-1]
+            if not base or base.startswith("."):
+                continue
+            if "__MACOSX" in path.split("/"):
+                continue
+            lower = base.lower()
+            if not lower.endswith(IMPORT_EXTENSIONS):
+                continue
+            if info.file_size > MAX_IMPORT_BYTES:
+                continue
+            raw = zf.read(info)
+            if not raw:
+                continue
+            out.append((base, raw))
+    return out
+
+
+@router.post("/import-txt-batch")
+async def import_novels_batch(
+    files: list[UploadFile] = File(...),
+    use_ai: str = Form("false"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """批量多书导入:每个 txt/md 一本;也可上传一个 zip(包内每个 txt 一本)。
+
+    书名取自文件名,自动去掉开头编号与 [标签]/例
+    ``001.[红袖vip完结]日租:….txt`` → ``日租:…``。
+    """
+    if not files:
+        raise HTTPException(400, "请选择文件夹内的 txt,或多个文件,或一个 zip")
+
+    ai_on = str(use_ai).strip().lower() in ("1", "true", "yes", "on")
+    # (filename, bytes)
+    pending: list[tuple[str, bytes]] = []
+    skipped: list[dict] = []
+
+    for upload in files:
+        filename = upload.filename or "novel.txt"
+        lower = filename.lower().replace("\\", "/")
+        base = lower.split("/")[-1]
+        raw = await upload.read()
+        if not raw:
+            skipped.append({"file": filename, "reason": "文件为空"})
+            continue
+
+        if base.endswith(".zip") or lower.endswith(".zip"):
+            if len(raw) > MAX_BATCH_NOVEL_ZIP_BYTES:
+                skipped.append(
+                    {
+                        "file": filename,
+                        "reason": f"压缩包超过 {MAX_BATCH_NOVEL_ZIP_BYTES // (1024 * 1024)}MB",
+                    }
+                )
+                continue
+            try:
+                extracted = await asyncio.to_thread(_iter_zip_novel_files, raw)
+            except HTTPException as e:
+                skipped.append({"file": filename, "reason": str(e.detail)})
+                continue
+            if not extracted:
+                skipped.append({"file": filename, "reason": "压缩包内无 txt/md"})
+                continue
+            pending.extend(extracted)
+            continue
+
+        if not any(base.endswith(ext) for ext in IMPORT_EXTENSIONS):
+            skipped.append({"file": filename, "reason": "仅支持 .txt / .md / .zip"})
+            continue
+        if len(raw) > MAX_IMPORT_BYTES:
+            skipped.append(
+                {
+                    "file": filename,
+                    "reason": f"单文件超过 {MAX_IMPORT_BYTES // (1024 * 1024)}MB",
+                }
+            )
+            continue
+        # 保留原始 basename(含中文),用于解析书名
+        display = (filename or "novel.txt").replace("\\", "/").split("/")[-1]
+        pending.append((display, raw))
+
+    if not pending:
+        raise HTTPException(
+            400,
+            "没有可导入的小说文件"
+            + (f"({len(skipped)} 项被跳过)" if skipped else ""),
+        )
+
+    # 按文件名排序,编号靠前的先导入
+    pending.sort(key=lambda item: item[0].lower())
+
+    created: list[dict] = []
+    failed: list[dict] = []
+    for fname, data in pending:
+        try:
+            # 每本独立提交;失败不影响已成功的
+            result = await _import_one_novel_from_bytes(
+                db,
+                user,
+                data=data,
+                filename=fname,
+                title_override=None,
+                use_ai=ai_on,
+                prefer_filename_title=True,
+            )
+            created.append(
+                {
+                    "file": fname,
+                    "novel_id": result["novel_id"],
+                    "title": result["title"],
+                    "chapters_created": result["chapters_created"],
+                    "word_count": result["word_count"],
+                }
+            )
+        except HTTPException as e:
+            failed.append({"file": fname, "reason": str(e.detail)})
+            db.rollback()
+        except Exception as e:
+            failed.append({"file": fname, "reason": str(e)})
+            db.rollback()
+
+    return {
+        "ok": True,
+        "created_count": len(created),
+        "failed_count": len(failed),
+        "skipped_count": len(skipped),
+        "created": created,
+        "failed": failed,
+        "skipped": skipped,
+        "message": (
+            f"成功导入 {len(created)} 本"
+            + (f",失败 {len(failed)} 本" if failed else "")
+            + (f",跳过 {len(skipped)} 项" if skipped else "")
         ),
     }
 
@@ -540,6 +725,60 @@ async def import_chapters_batch(
             + (f",跳过 {len(skipped)} 个文件" if skipped else "")
         ),
     }
+
+
+def _safe_export_stem(title: str) -> str:
+    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", (title or "").strip())
+    s = re.sub(r"\s+", " ", s).strip(" .")
+    return (s or "未命名章节")[:80]
+
+
+@router.get("/{novel_id}/export-chapters")
+def export_chapters(
+    novel_id: int,
+    volume_id: int | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """导出章节正文为 zip(每章一个 txt,文件名 0001_章名.txt,可再导入)。"""
+    novel = get_owned_novel(novel_id, user, db)
+    q = db.query(Chapter).filter_by(novel_id=novel_id)
+    if volume_id is not None:
+        vol = db.query(Volume).filter_by(id=volume_id, novel_id=novel_id).first()
+        if vol is None:
+            raise HTTPException(400, "目标卷不存在")
+        q = q.filter_by(volume_id=volume_id)
+    chapters = q.order_by(Chapter.sort, Chapter.id).all()
+    if not chapters:
+        raise HTTPException(400, "没有可导出的章节")
+
+    ver_ids = [c.current_version_id for c in chapters if c.current_version_id]
+    content_map: dict[int, str] = {}
+    if ver_ids:
+        for row in db.query(ChapterVersion.id, ChapterVersion.content).filter(ChapterVersion.id.in_(ver_ids)).all():
+            content_map[int(row[0])] = row[1] or ""
+
+    buf = io.BytesIO()
+    used_names: set[str] = set()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for i, ch in enumerate(chapters, start=1):
+            stem = _safe_export_stem(ch.title)
+            name = f"{i:04d}_{stem}.txt"
+            if name in used_names:
+                name = f"{i:04d}_{stem}_{ch.id}.txt"
+            used_names.add(name)
+            body = ""
+            if ch.current_version_id:
+                body = content_map.get(int(ch.current_version_id), "")
+            # 无 BOM,便于与导入解码一致
+            zf.writestr(name, body.encode("utf-8"))
+
+    buf.seek(0)
+    zip_name = f"{_safe_export_stem(novel.title)}_chapters.zip"
+    headers = {
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(zip_name)}",
+    }
+    return StreamingResponse(buf, media_type="application/zip", headers=headers)
 
 
 @router.get("/{novel_id}", response_model=NovelOut)
@@ -791,6 +1030,112 @@ def delete_novel(novel_id: int, user: User = Depends(get_current_user), db: Sess
     db.query(Novel).filter_by(id=nid).delete(synchronize_session=False)
     db.commit()
     return {"ok": True, "title": title, "purged": purged}
+
+
+@router.post("/{novel_id}/resplit-chapters")
+async def resplit_novel_chapters(
+    novel_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """对「整本一章」的书重新分章:先规则,失败再大模型。"""
+    novel = get_owned_novel(novel_id, user, db)
+    chapters = db.query(Chapter).filter_by(novel_id=novel_id).order_by(Chapter.sort, Chapter.id).all()
+    if not chapters:
+        raise HTTPException(400, "没有章节可重切")
+    # 拼回全文
+    parts: list[str] = []
+    for ch in chapters:
+        body = ""
+        if ch.current_version_id:
+            ver = db.query(ChapterVersion).filter_by(id=ch.current_version_id).first()
+            body = (ver.content if ver else "") or ""
+        parts.append(body)
+    text = "\n\n".join(p for p in parts if p).strip()
+    if len(text) < MIN_CHAPTER_CHARS * 4:
+        raise HTTPException(400, "正文太短,无法重切")
+
+    parsed = await asyncio.to_thread(parse_novel_txt, text, f"{novel.title}.txt")
+    if sum(len(v.chapters) for v in parsed.volumes) <= 1:
+        parsed = maybe_ai_split_parsed(db, user.id, parsed, text, novel_id=novel.id)
+    parsed.title = novel.title
+    parsed = sanitize_parsed_novel(parsed, already_cleaned=True)
+    ensure_unique_titles(parsed.volumes)
+    total = sum(len(v.chapters) for v in parsed.volumes)
+    if total <= 1:
+        raise HTTPException(400, "规则与 AI 均未能拆出多章,请检查正文是否有场景分界")
+
+    if total > MAX_IMPORT_CHAPTERS:
+        kept = 0
+        for v in parsed.volumes:
+            remain = MAX_IMPORT_CHAPTERS - kept
+            if remain <= 0:
+                v.chapters = []
+                continue
+            if len(v.chapters) > remain:
+                v.chapters = v.chapters[:remain]
+            kept += len(v.chapters)
+        parsed.volumes = [v for v in parsed.volumes if v.chapters]
+        total = sum(len(v.chapters) for v in parsed.volumes)
+
+    chapter_ids = [c.id for c in chapters]
+    db.query(Chapter).filter(Chapter.id.in_(chapter_ids)).update(
+        {Chapter.current_version_id: None}, synchronize_session=False
+    )
+    db.query(ChapterVersion).filter(ChapterVersion.chapter_id.in_(chapter_ids)).delete(synchronize_session=False)
+    db.query(Chapter).filter(Chapter.id.in_(chapter_ids)).delete(synchronize_session=False)
+    db.query(Volume).filter_by(novel_id=novel_id).delete(synchronize_session=False)
+    db.flush()
+
+    vol_rows: list[tuple[Volume, object]] = []
+    for vol_sort, v in enumerate(parsed.volumes, start=1):
+        vol = Volume(novel_id=novel.id, title=v.title[:128], outline=v.outline, sort=vol_sort)
+        db.add(vol)
+        vol_rows.append((vol, v))
+    db.flush()
+
+    chapter_rows: list[tuple[Chapter, str]] = []
+    ch_sort = 0
+    for vol, v in vol_rows:
+        for pch in v.chapters:
+            content = (pch.content or "").strip()
+            if len(content) < MIN_CHAPTER_CHARS:
+                continue
+            ch_sort += 1
+            chapter = Chapter(
+                novel_id=novel.id,
+                volume_id=vol.id,
+                title=pch.title[:128],
+                outline=pch.outline,
+                sort=ch_sort,
+                status="approved",
+                word_count=len(content),
+            )
+            db.add(chapter)
+            chapter_rows.append((chapter, content))
+    db.flush()
+    for chapter, content in chapter_rows:
+        version = ChapterVersion(
+            chapter_id=chapter.id,
+            kind="manual",
+            content=content,
+            word_count=len(content),
+            created_by_id=user.id,
+        )
+        db.add(version)
+        db.flush()
+        chapter.current_version_id = version.id
+
+    recompute_words(db, novel)
+    db.commit()
+    return {
+        "ok": True,
+        "novel_id": novel.id,
+        "title": novel.title,
+        "chapters_created": len(chapter_rows),
+        "source": parsed.source,
+        "message": f"已重切为 {len(chapter_rows)} 章({parsed.source})",
+    }
 
 
 @router.get("/{novel_id}/stats")
