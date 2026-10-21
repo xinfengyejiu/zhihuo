@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { api, getApiBase, getToken } from "@/lib/api";
+import { api } from "@/lib/api";
+import { resolveAssetUrl } from "@/lib/assetCache";
 import { useAuth } from "@/lib/auth";
 import type { Novel, Tag } from "@/lib/types";
 import { PLATFORMS, PLATFORM_LABEL } from "@/lib/types";
@@ -26,48 +27,19 @@ function previewBatchNovelTitle(filename: string): string {
 }
 
 function ShelfCoverThumb({ url, title }: { url: string | null; title: string }) {
-  const [src, setSrc] = useState("");
-  useEffect(() => {
-    if (!url) {
-      setSrc("");
-      return;
-    }
-    let revoked: string | null = null;
-    let cancelled = false;
-    const base = getApiBase().replace(/\/api\/?$/, "");
-    const resolved =
-      url.startsWith("http") || url.startsWith("data:")
-        ? url
-        : url.startsWith("/gen-assets/")
-          ? `${base}/api${url}`
-          : url.startsWith("/")
-            ? `${base}${url}`
-            : url;
-    if (!url.includes("/gen-assets/")) {
-      setSrc(resolved);
-      return;
-    }
-    const token = getToken();
-    fetch(resolved, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
-      .then(async (r) => {
-        if (!r.ok) throw new Error("fail");
-        const blob = await r.blob();
-        if (cancelled) return;
-        revoked = URL.createObjectURL(blob);
-        setSrc(revoked);
-      })
-      .catch(() => {
-        if (!cancelled) setSrc(resolved);
-      });
-    return () => {
-      cancelled = true;
-      if (revoked) URL.revokeObjectURL(revoked);
-    };
-  }, [url]);
+  const [failed, setFailed] = useState(false);
+  const src = url && !failed ? resolveAssetUrl(url) : "";
   return (
     <div className="mb-3 aspect-[3/4] w-full overflow-hidden rounded-lg border border-slate-100 bg-slate-50">
       {src ? (
-        <img src={src} alt={`${title}封面`} className="h-full w-full object-cover" />
+        <img
+          src={src}
+          alt={`${title}封面`}
+          className="h-full w-full object-cover"
+          loading="lazy"
+          decoding="async"
+          onError={() => setFailed(true)}
+        />
       ) : (
         <div className="flex h-full items-center justify-center text-[11px] text-slate-300">暂无封面</div>
       )}

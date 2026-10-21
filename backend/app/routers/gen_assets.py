@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from ..ai.media_gen import GEN_ROOT
 from ..database import get_db
-from ..models import Chapter, Novel, ReviewableFilter, User
+from ..models import Novel, User
 from ..security import user_from_token
 
 router = APIRouter(prefix="/gen-assets", tags=["gen-assets"])
@@ -31,26 +31,28 @@ _MIME = {
 }
 
 
+# 进程内正向缓存:同一封面文件只查库一次,避免书城网格 N 次重复鉴权查询
+_PUBLIC_COVER_OK: set[tuple[int, str]] = set()
+
+
 def _is_public_novel_cover(user_id: int, filename: str, db: Session) -> bool:
-    """该文件若是「至少有一章已过审」小说的封面,则允许匿名访问。"""
+    """小说封面允许匿名读取(书城/书架 <img> 直链 + 浏览器缓存)。"""
+    key = (user_id, filename)
+    if key in _PUBLIC_COVER_OK:
+        return True
     candidates = (
         f"/gen-assets/{user_id}/{filename}",
         f"/api/gen-assets/{user_id}/{filename}",
     )
-    novel_ids = [
-        nid
-        for (nid,) in db.query(Novel.id)
+    ok = (
+        db.query(Novel.id)
         .filter(Novel.cover.isnot(None), or_(*[Novel.cover == c for c in candidates]))
-        .all()
-    ]
-    if not novel_ids:
-        return False
-    return (
-        db.query(Chapter.id)
-        .filter(Chapter.novel_id.in_(novel_ids), Chapter.status.in_(ReviewableFilter))
         .first()
         is not None
     )
+    if ok:
+        _PUBLIC_COVER_OK.add(key)
+    return ok
 
 
 def _authorize_asset(
@@ -92,4 +94,14 @@ def get_gen_asset(
     if not str(path).startswith(str(root)) or not path.is_file():
         raise HTTPException(404, "文件不存在")
     ext = path.suffix.lstrip(".").lower()
-    return FileResponse(path, media_type=_MIME.get(ext, "application/octet-stream"), filename=name)
+    # 文件名多为内容哈希,可长期缓存,显著减轻书城/书架反复拉封面
+    headers = {
+        "Cache-Control": "public, max-age=2592000, immutable",
+        "ETag": f'"{user_id}-{name}"',
+    }
+    return FileResponse(
+        path,
+        media_type=_MIME.get(ext, "application/octet-stream"),
+        filename=name,
+        headers=headers,
+    )

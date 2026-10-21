@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { api, getApiBase, getToken, readerNovelUrl } from "@/lib/api";
+import { api, getApiBase, readerNovelUrl } from "@/lib/api";
+import { resolveAssetUrl } from "@/lib/assetCache";
 import { filterSkillsForChat } from "@/lib/product";
 import type { Chapter, CollabInfo, KbInfo, Novel, SkillInfo } from "@/lib/types";
 import { PLATFORMS, PLATFORM_LABEL } from "@/lib/types";
@@ -137,54 +138,22 @@ export default function NovelOverviewPage() {
 }
 
 /* ================= 封面:上传 / AI 按关键词生成 ================= */
-function resolveAssetUrl(url: string): string {
-  if (!url) return "";
-  if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("data:") || url.startsWith("blob:")) {
-    return url;
-  }
-  const base = getApiBase().replace(/\/api\/?$/, "");
-  if (url.startsWith("/api/")) return `${base}${url}`;
-  if (url.startsWith("/gen-assets/")) return `${base}/api${url}`;
-  return url.startsWith("/") ? `${base}${url}` : url;
-}
-
 function AuthedCoverImg({ url, alt, className }: { url: string; alt: string; className?: string }) {
-  const [src, setSrc] = useState("");
-  useEffect(() => {
-    if (!url) {
-      setSrc("");
-      return;
-    }
-    let revoked: string | null = null;
-    let cancelled = false;
-    const resolved = resolveAssetUrl(url);
-    const needsAuth = url.includes("/gen-assets/") || resolved.includes("/gen-assets/");
-    if (!needsAuth) {
-      setSrc(resolved);
-      return;
-    }
-    const token = getToken();
-    fetch(resolved, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
-      .then(async (resp) => {
-        if (!resp.ok) throw new Error(String(resp.status));
-        const blob = await resp.blob();
-        if (cancelled) return;
-        const obj = URL.createObjectURL(blob);
-        revoked = obj;
-        setSrc(obj);
-      })
-      .catch(() => {
-        if (!cancelled) setSrc(resolved);
-      });
-    return () => {
-      cancelled = true;
-      if (revoked) URL.revokeObjectURL(revoked);
-    };
-  }, [url]);
+  const [failed, setFailed] = useState(false);
+  const src = url && !failed ? resolveAssetUrl(url) : "";
   if (!src) {
     return <div className={`animate-pulse bg-slate-100 ${className || ""}`} />;
   }
-  return <img src={src} alt={alt} className={className} />;
+  return (
+    <img
+      src={src}
+      alt={alt}
+      className={className}
+      loading="lazy"
+      decoding="async"
+      onError={() => setFailed(true)}
+    />
+  );
 }
 
 function CoverCard({ novel, onChanged }: { novel: Novel; onChanged: () => void }) {

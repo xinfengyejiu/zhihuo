@@ -12,6 +12,9 @@ function resolveUrl(url: string): string {
   return url;
 }
 
+/** 浏览器会按 Cache-Control 缓存;再加一层内存标记,避免同页反复 onError 抖动。 */
+const failedUrls = new Set<string>();
+
 export function CoverImg({
   url,
   title,
@@ -21,8 +24,9 @@ export function CoverImg({
   title: string;
   className?: string;
 }) {
-  const [failed, setFailed] = useState(false);
-  const src = url && !failed ? resolveUrl(url) : "";
+  const resolved = url ? resolveUrl(url) : "";
+  const [failed, setFailed] = useState(() => (resolved ? failedUrls.has(resolved) : false));
+  const src = resolved && !failed ? resolved : "";
 
   if (!src) {
     return (
@@ -36,7 +40,13 @@ export function CoverImg({
       src={src}
       alt={title}
       className={className}
-      onError={() => setFailed(true)}
+      loading="lazy"
+      decoding="async"
+      referrerPolicy="no-referrer"
+      onError={() => {
+        failedUrls.add(src);
+        setFailed(true);
+      }}
     />
   );
 }

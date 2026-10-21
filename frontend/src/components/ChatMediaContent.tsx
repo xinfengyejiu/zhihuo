@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { getApiBase, getToken } from "@/lib/api";
+import { loadAuthedAsset } from "@/lib/assetCache";
 
 type Segment =
   | { kind: "text"; text: string }
@@ -121,7 +122,7 @@ function parseContent(content: string): Segment[] {
   return segs.length ? segs : [{ kind: "text", text: content }];
 }
 
-/** 带鉴权拉取 gen-assets,转成 blob URL,避免 <img> 无法带 Authorization。 */
+/** 带鉴权拉取 gen-assets,转成 blob URL;同路径命中内存缓存秒回。 */
 function useAuthedSrc(url: string, enabled: boolean) {
   const [src, setSrc] = useState<string>("");
   const [error, setError] = useState(false);
@@ -132,43 +133,21 @@ function useAuthedSrc(url: string, enabled: boolean) {
       setError(false);
       return;
     }
-    let revoked: string | null = null;
     let cancelled = false;
-
-    const resolved = toApiUrl(url);
-    // 远程 http(s)/data 直接用; gen-assets 用 fetch+token 更稳
-    const needsAuthFetch = url.includes("/gen-assets/") || resolved.includes("/gen-assets/");
-
-    if (!needsAuthFetch) {
-      setSrc(resolved);
-      setError(false);
-      return;
-    }
-
-    const token = getToken();
-    fetch(resolved, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    })
-      .then(async (resp) => {
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const blob = await resp.blob();
+    void loadAuthedAsset(url)
+      .then((u) => {
         if (cancelled) return;
-        const obj = URL.createObjectURL(blob);
-        revoked = obj;
-        setSrc(obj);
+        setSrc(u || toApiUrl(url));
         setError(false);
       })
       .catch(() => {
         if (!cancelled) {
-          // 回退 query token 直链
-          setSrc(resolved);
+          setSrc(toApiUrl(url));
           setError(false);
         }
       });
-
     return () => {
       cancelled = true;
-      if (revoked) URL.revokeObjectURL(revoked);
     };
   }, [url, enabled]);
 
