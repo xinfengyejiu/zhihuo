@@ -63,7 +63,18 @@ from ..models import (
     Volume,
     WorldEntry,
 )
-from ..schemas import CoverGenerateIn, NovelIn, NovelOut, NovelUpdateIn, TagIn, TagOut, TagUpdateIn
+from ..schemas import (
+    CoverBatchGenerateIn,
+    CoverBatchGenerateOut,
+    CoverBatchItemOut,
+    CoverGenerateIn,
+    NovelIn,
+    NovelOut,
+    NovelUpdateIn,
+    TagIn,
+    TagOut,
+    TagUpdateIn,
+)
 from ..security import get_current_user
 
 router = APIRouter(prefix="/novels", tags=["novels"])
@@ -603,6 +614,90 @@ async def import_novels_batch(
     }
 
 
+@router.post("/cover/generate-batch", response_model=CoverBatchGenerateOut)
+async def generate_covers_batch(
+    body: CoverBatchGenerateIn = Body(default_factory=CoverBatchGenerateIn),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """一批书依次 AI 生成封面。默认只补无封面的书;单次最多 40 本。
+
+    须声明在 /{novel_id}/… 之前,避免 path 被当成 novel_id。
+    """
+    limit = max(1, min(int(body.limit or MAX_COVER_BATCH), MAX_COVER_BATCH))
+    q = _accessible_novels_query(db, user.id)
+    if body.novel_ids:
+        ids = list(dict.fromkeys(int(i) for i in body.novel_ids if i))
+        novels = q.filter(Novel.id.in_(ids)).order_by(Novel.id.asc()).all()
+        by_id = {n.id: n for n in novels}
+        ordered = [by_id[i] for i in ids if i in by_id]
+    else:
+        ordered = q.order_by(Novel.updated_at.desc()).all()
+
+    targets: list[Novel] = []
+    skipped_pre: list[CoverBatchItemOut] = []
+    for novel in ordered:
+        if body.only_missing and (novel.cover or "").strip():
+            skipped_pre.append(
+                CoverBatchItemOut(
+                    novel_id=novel.id,
+                    title=novel.title,
+                    status="skipped",
+                    cover=novel.cover,
+                    error="已有封面",
+                )
+            )
+            continue
+        targets.append(novel)
+        if len(targets) >= limit:
+            break
+
+    items: list[CoverBatchItemOut] = list(skipped_pre)
+    ok = failed = 0
+    skipped = len(skipped_pre)
+    for novel in targets:
+        try:
+            url = await _generate_cover_url(db, user, novel, extra=body.extra)
+            novel.cover = url
+            db.commit()
+            db.refresh(novel)
+            ok += 1
+            items.append(
+                CoverBatchItemOut(
+                    novel_id=novel.id, title=novel.title, status="ok", cover=url
+                )
+            )
+        except HTTPException as e:
+            db.rollback()
+            failed += 1
+            detail = e.detail if isinstance(e.detail, str) else str(e.detail)
+            items.append(
+                CoverBatchItemOut(
+                    novel_id=novel.id, title=novel.title, status="failed", error=detail
+                )
+            )
+        except Exception as e:
+            db.rollback()
+            failed += 1
+            items.append(
+                CoverBatchItemOut(
+                    novel_id=novel.id,
+                    title=novel.title,
+                    status="failed",
+                    error=str(e)[:200] or "生成失败",
+                )
+            )
+        await asyncio.sleep(0.35)
+
+    return CoverBatchGenerateOut(
+        total=ok + skipped + failed,
+        ok=ok,
+        skipped=skipped,
+        failed=failed,
+        items=items,
+    )
+
+
 @router.post("/{novel_id}/import-chapters")
 async def import_chapters_batch(
     novel_id: int,
@@ -864,6 +959,51 @@ def build_cover_prompt(novel: Novel, keywords: str, extra: str | None = None) ->
     return "\n".join(lines)
 
 
+MAX_COVER_BATCH = 40
+
+
+async def _generate_cover_url(
+    db: Session,
+    user: User,
+    novel: Novel,
+    *,
+    keywords: str | None = None,
+    extra: str | None = None,
+) -> str:
+    """生成并返回封面 URL,不写库。失败抛 HTTPException。"""
+    from ..ai.media_gen import find_modality_model, generate_image, resolve_modality_route
+
+    kw = (keywords or "").strip() or _default_cover_keywords(db, novel)
+    prompt = build_cover_prompt(novel, kw, extra)
+
+    found = find_modality_model(db, user.id, "image")
+    if found:
+        target = resolve_modality_route(
+            db, user.id, "novel.visual", "image", provider_id=found[0], model_id=found[1]
+        )
+        try:
+            urls = await generate_image(target, prompt, user.id, size="1024x1792", n=1)
+        except Exception:
+            urls = await generate_image(target, prompt, user.id, size="1024x1024", n=1)
+        url = urls[0] if urls else None
+    else:
+        from ..ai.local_image import render_local_card
+
+        url = render_local_card(user.id, novel.title, context=f"{kw}\n{(novel.summary or '')[:160]}")
+
+    if not url:
+        raise HTTPException(502, "封面生成失败,未返回地址。请在个人中心配置可用的图片模型后重试。")
+    return url
+
+
+def _accessible_novels_query(db: Session, user_id: int):
+    collab_ids = [
+        nid
+        for (nid,) in db.query(NovelCollaborator.novel_id).filter_by(user_id=user_id).all()
+    ]
+    return db.query(Novel).filter(or_(Novel.owner_id == user_id, Novel.id.in_(collab_ids or [-1])))
+
+
 @router.post("/{novel_id}/cover/upload", response_model=NovelOut)
 async def upload_cover(
     novel_id: int,
@@ -903,30 +1043,10 @@ async def generate_cover(
     db: Session = Depends(get_db),
 ):
     """按书名/简介/标签/世界观关键词 AI 生成封面。"""
-    from ..ai.media_gen import find_modality_model, generate_image, resolve_modality_route
-
     novel = get_owned_novel(novel_id, user, db)
-    keywords = (body.keywords or "").strip() or _default_cover_keywords(db, novel)
-    prompt = build_cover_prompt(novel, keywords, body.extra)
-
-    found = find_modality_model(db, user.id, "image")
-    if found:
-        target = resolve_modality_route(
-            db, user.id, "novel.visual", "image", provider_id=found[0], model_id=found[1]
-        )
-        # 竖版封面常用 1024x1792;不支持时 generate_image 内部会回退
-        try:
-            urls = await generate_image(target, prompt, user.id, size="1024x1792", n=1)
-        except Exception:
-            urls = await generate_image(target, prompt, user.id, size="1024x1024", n=1)
-        url = urls[0] if urls else None
-    else:
-        from ..ai.local_image import render_local_card
-
-        url = render_local_card(user.id, novel.title, context=f"{keywords}\n{(novel.summary or '')[:160]}")
-
-    if not url:
-        raise HTTPException(502, "封面生成失败,未返回地址。请在个人中心配置可用的图片模型后重试。")
+    url = await _generate_cover_url(
+        db, user, novel, keywords=body.keywords, extra=body.extra
+    )
     novel.cover = url
     db.commit()
     db.refresh(novel)

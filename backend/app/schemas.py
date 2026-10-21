@@ -149,6 +149,31 @@ class CoverGenerateIn(BaseModel):
     extra: Optional[str] = None
 
 
+class CoverBatchGenerateIn(BaseModel):
+    """批量 AI 生成封面。novel_ids 为空时按 only_missing 扫当前用户有权限的书。"""
+    novel_ids: list[int] = []
+    only_missing: bool = True
+    extra: Optional[str] = None
+    # 单次上限,避免一次打爆图片模型配额
+    limit: int = 40
+
+
+class CoverBatchItemOut(BaseModel):
+    novel_id: int
+    title: str
+    status: str  # ok | skipped | failed
+    cover: Optional[str] = None
+    error: Optional[str] = None
+
+
+class CoverBatchGenerateOut(BaseModel):
+    total: int
+    ok: int
+    skipped: int
+    failed: int
+    items: list[CoverBatchItemOut] = []
+
+
 class NovelPlatformOut(ORMModel):
     platform: str
     enabled: bool

@@ -11,6 +11,7 @@ import { PLATFORMS, PLATFORM_LABEL } from "@/lib/types";
 import { Badge, Button, Empty, ErrorText, Input, Label, Modal, Select, Spinner, Textarea } from "@/components/ui";
 
 const SHELF_PAGE_SIZE = 12;
+const COVER_BATCH_MAX = 40;
 
 /** 与后端 title_from_batch_novel_filename 一致:去编号与 []/【】标签。 */
 function previewBatchNovelTitle(filename: string): string {
@@ -82,6 +83,16 @@ export default function BookshelfPage() {
   const [filterStatus, setFilterStatus] = useState<string>("");
   const [shelfPage, setShelfPage] = useState(1);
   const [tagsManageOpen, setTagsManageOpen] = useState(false);
+  // 批量 AI 封面
+  const [coverBatchOpen, setCoverBatchOpen] = useState(false);
+  const [coverBatchOnlyMissing, setCoverBatchOnlyMissing] = useState(true);
+  const [coverBatchIds, setCoverBatchIds] = useState<number[]>([]);
+  const [coverBatchExtra, setCoverBatchExtra] = useState("");
+  const [coverBatchRunning, setCoverBatchRunning] = useState(false);
+  const [coverBatchProgress, setCoverBatchProgress] = useState("");
+  const [coverBatchLog, setCoverBatchLog] = useState<string[]>([]);
+  const [coverBatchError, setCoverBatchError] = useState("");
+  const coverBatchCancelRef = useRef(false);
 
   // 建书表单
   const [title, setTitle] = useState("");
@@ -120,6 +131,79 @@ export default function BookshelfPage() {
       el.setAttribute("directory", "");
     }
   }, [batchImportOpen]);
+
+  function openCoverBatchModal() {
+    const missing = novels.filter((n) => !(n.cover || "").trim()).map((n) => n.id);
+    setCoverBatchOnlyMissing(true);
+    setCoverBatchIds(missing.slice(0, COVER_BATCH_MAX));
+    setCoverBatchExtra("");
+    setCoverBatchProgress("");
+    setCoverBatchLog([]);
+    setCoverBatchError("");
+    coverBatchCancelRef.current = false;
+    setCoverBatchOpen(true);
+    setError("");
+  }
+
+  function toggleCoverBatchId(id: number) {
+    setCoverBatchIds((prev) => {
+      if (prev.includes(id)) return prev.filter((x) => x !== id);
+      if (prev.length >= COVER_BATCH_MAX) return prev;
+      return [...prev, id];
+    });
+  }
+
+  function applyCoverBatchFilter(onlyMissing: boolean) {
+    setCoverBatchOnlyMissing(onlyMissing);
+    if (onlyMissing) {
+      setCoverBatchIds(
+        novels.filter((n) => !(n.cover || "").trim()).map((n) => n.id).slice(0, COVER_BATCH_MAX)
+      );
+    }
+  }
+
+  async function runCoverBatch() {
+    if (coverBatchRunning || coverBatchIds.length === 0) return;
+    const selected = novels.filter((n) => coverBatchIds.includes(n.id));
+    const queue = coverBatchOnlyMissing
+      ? selected.filter((n) => !(n.cover || "").trim())
+      : selected;
+    if (!queue.length) {
+      setCoverBatchError("没有需要生成封面的书");
+      return;
+    }
+    coverBatchCancelRef.current = false;
+    setCoverBatchRunning(true);
+    setCoverBatchError("");
+    setCoverBatchLog([]);
+    let ok = 0;
+    let failed = 0;
+    const logs: string[] = [];
+    for (let i = 0; i < queue.length; i++) {
+      if (coverBatchCancelRef.current) {
+        logs.push(`已取消,剩余 ${queue.length - i} 本未处理`);
+        setCoverBatchLog([...logs]);
+        break;
+      }
+      const n = queue[i];
+      setCoverBatchProgress(`正在生成（《${n.title}》） ${i + 1}/${queue.length}`);
+      try {
+        await api.post<Novel>(`/novels/${n.id}/cover/generate`, {
+          keywords: null,
+          extra: coverBatchExtra.trim() || null,
+        });
+        ok += 1;
+        logs.push(`✓ 《${n.title}》`);
+      } catch (e) {
+        failed += 1;
+        logs.push(`✗ 《${n.title}》 ${e instanceof Error ? e.message : "失败"}`);
+      }
+      setCoverBatchLog([...logs]);
+    }
+    setCoverBatchProgress(`完成:成功 ${ok} · 失败 ${failed}`);
+    setCoverBatchRunning(false);
+    await load();
+  }
 
   async function createNovel() {
     setError("");
@@ -325,6 +409,9 @@ export default function BookshelfPage() {
             }}
           >
             批量导入多书
+          </Button>
+          <Button variant="outline" onClick={openCoverBatchModal}>
+            批量生成封面
           </Button>
           <Button onClick={() => setCreateOpen(true)}>+ 新建小说</Button>
         </div>
@@ -540,6 +627,133 @@ export default function BookshelfPage() {
           )}
         </>
       )}
+
+      <Modal
+        open={coverBatchOpen}
+        title="批量生成 AI 封面"
+        onClose={() => {
+          if (coverBatchRunning) return;
+          setCoverBatchOpen(false);
+        }}
+        wide
+      >
+        <div className="space-y-3">
+          <p className="rounded-lg bg-amber-50 p-2 text-xs leading-5 text-amber-800">
+            按书名、简介、标签与世界观关键词依次生成竖版封面。单次最多 {COVER_BATCH_MAX}{" "}
+            本;请先在个人中心配置图片模型。生成较慢,可随时取消。
+          </p>
+          <label className="flex items-center gap-2 text-sm text-slate-700">
+            <input
+              type="checkbox"
+              checked={coverBatchOnlyMissing}
+              disabled={coverBatchRunning}
+              onChange={(e) => applyCoverBatchFilter(e.target.checked)}
+            />
+            仅生成无封面的书(推荐)
+          </label>
+          <div>
+            <Label>画面补充(可选,应用到本批全部)</Label>
+            <Textarea
+              rows={2}
+              value={coverBatchExtra}
+              disabled={coverBatchRunning}
+              onChange={(e) => setCoverBatchExtra(e.target.value)}
+              placeholder="如:电影感光影、冷色调、主角背影"
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={coverBatchRunning}
+              onClick={() => {
+                const pool = coverBatchOnlyMissing
+                  ? novels.filter((n) => !(n.cover || "").trim())
+                  : novels;
+                setCoverBatchIds(pool.map((n) => n.id).slice(0, COVER_BATCH_MAX));
+              }}
+            >
+              全选{coverBatchOnlyMissing ? "无封面" : "全部"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={coverBatchRunning}
+              onClick={() => setCoverBatchIds([])}
+            >
+              清空
+            </Button>
+            <span className="text-slate-500">
+              已选 {coverBatchIds.length}/{COVER_BATCH_MAX}
+              {coverBatchOnlyMissing
+                ? ` · 无封面 ${novels.filter((n) => !(n.cover || "").trim()).length} 本`
+                : ""}
+            </span>
+          </div>
+          <div className="max-h-56 overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-2">
+            <ul className="space-y-1">
+              {novels.map((n) => {
+                const hasCover = !!(n.cover || "").trim();
+                const disabledRow = coverBatchOnlyMissing && hasCover;
+                const checked = coverBatchIds.includes(n.id);
+                return (
+                  <li key={n.id}>
+                    <label
+                      className={`flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs ${
+                        disabledRow ? "opacity-40" : "hover:bg-white"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        disabled={coverBatchRunning || disabledRow}
+                        checked={checked}
+                        onChange={() => toggleCoverBatchId(n.id)}
+                      />
+                      <span className="min-w-0 flex-1 truncate text-slate-700">《{n.title}》</span>
+                      <span className={hasCover ? "text-emerald-600" : "text-slate-400"}>
+                        {hasCover ? "有封面" : "无封面"}
+                      </span>
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+          {coverBatchProgress && (
+            <p className="text-xs text-indigo-600">{coverBatchProgress}</p>
+          )}
+          {coverBatchLog.length > 0 && (
+            <div className="max-h-36 overflow-auto rounded-lg border border-slate-100 bg-white p-2 text-[11px] leading-5 text-slate-600">
+              {coverBatchLog.map((line, i) => (
+                <div key={`${i}-${line.slice(0, 24)}`}>{line}</div>
+              ))}
+            </div>
+          )}
+          <ErrorText>{coverBatchError}</ErrorText>
+          <div className="flex justify-end gap-2 pt-1">
+            {coverBatchRunning ? (
+              <Button
+                variant="outline"
+                onClick={() => {
+                  coverBatchCancelRef.current = true;
+                }}
+              >
+                取消剩余
+              </Button>
+            ) : (
+              <Button variant="outline" onClick={() => setCoverBatchOpen(false)}>
+                关闭
+              </Button>
+            )}
+            <Button
+              disabled={coverBatchRunning || coverBatchIds.length === 0}
+              onClick={() => void runCoverBatch()}
+            >
+              {coverBatchRunning ? "生成中…" : `开始生成(${coverBatchIds.length})`}
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       <Modal
         open={batchImportOpen}
